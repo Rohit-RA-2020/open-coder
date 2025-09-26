@@ -18,6 +18,153 @@ import (
 	"github.com/pterm/pterm/putils"
 )
 
+// Config represents the application configuration
+type Config struct {
+	APIKey  string `json:"api_key"`
+	BaseURL string `json:"base_url"`
+	Model   string `json:"model"`
+}
+
+// getConfigPath returns the path to the configuration file
+func getConfigPath() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "~" // fallback
+	}
+	return filepath.Join(homeDir, ".open-coder", "config")
+}
+
+// loadConfig reads configuration from file
+func loadConfig() (*Config, error) {
+	configPath := getConfigPath()
+
+	// Check if config file exists
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("config file not found")
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	var config Config
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	return &config, nil
+}
+
+// saveConfig writes configuration to file
+func saveConfig(config *Config) error {
+	configPath := getConfigPath()
+
+	// Create directory if it doesn't exist
+	configDir := filepath.Dir(configPath)
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
+}
+
+// getConfiguration gets configuration from environment variables, config file, or prompts user
+func getConfiguration() (*Config, error) {
+	// First priority: environment variables
+	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
+	model := strings.TrimSpace(os.Getenv("OPENAI_MODEL"))
+
+	// If all environment variables are set, use them
+	if apiKey != "" && baseURL != "" && model != "" {
+		return &Config{
+			APIKey:  apiKey,
+			BaseURL: baseURL,
+			Model:   model,
+		}, nil
+	}
+
+	// Second priority: config file
+	config, err := loadConfig()
+	if err == nil {
+		// Override with environment variables if they exist
+		if apiKey != "" {
+			config.APIKey = apiKey
+		}
+		if baseURL != "" {
+			config.BaseURL = baseURL
+		}
+		if model != "" {
+			config.Model = model
+		}
+		return config, nil
+	}
+
+	// Third priority: prompt user (first time setup)
+	pterm.FgLightYellow.Println("🔧 First-time setup - Please provide your OpenAI configuration:")
+	pterm.FgLightWhite.Println("This will be saved to ~/.open-coder/config for future use.")
+	pterm.FgLightWhite.Println("You can also set these as environment variables to override the saved config.")
+	pterm.FgLightWhite.Println()
+
+	reader := bufio.NewReader(os.Stdin)
+
+	// Prompt for API key if not set
+	if apiKey == "" {
+		pterm.FgLightWhite.Print("API Key: ")
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, fmt.Errorf("failed to read API key: %w", err)
+		}
+		apiKey = strings.TrimSpace(input)
+	}
+
+	// Prompt for base URL if not set
+	if baseURL == "" {
+		pterm.FgLightWhite.Print("Base URL: ")
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, fmt.Errorf("failed to read base URL: %w", err)
+		}
+		baseURL = strings.TrimSpace(input)
+	}
+
+	// Prompt for model if not set
+	if model == "" {
+		pterm.FgLightWhite.Print("Model: ")
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, fmt.Errorf("failed to read model: %w", err)
+		}
+		model = strings.TrimSpace(input)
+	}
+
+	config = &Config{
+		APIKey:  apiKey,
+		BaseURL: baseURL,
+		Model:   model,
+	}
+
+	// Save configuration for future use
+	if err := saveConfig(config); err != nil {
+		pterm.FgLightYellow.Printf("⚠️  Warning: Could not save configuration: %v\n", err)
+		pterm.FgLightYellow.Println("You'll need to provide configuration on each run or set environment variables.")
+	} else {
+		pterm.FgLightGreen.Println("✅ Configuration saved! You won't be prompted again.")
+	}
+
+	return config, nil
+}
+
 // Configuration is sourced from the current environment:
 // - OPENAI_API_KEY
 // - OPENAI_BASE_URL
@@ -29,6 +176,8 @@ type SimpleAgent struct {
 	servers        []*MCPServerConfig
 	openaiClient   *openai.Client
 	model          string
+	apiKey         string // Store API key for settings access
+	baseURL        string // Store base URL for settings access
 	userID         string
 	systemPrompt   string
 	messages       []openai.ChatCompletionMessageParamUnion
@@ -64,6 +213,8 @@ func NewSimpleAgent(ctx context.Context, model string, apiKey string, baseURL st
 		servers:        make([]*MCPServerConfig, 0),
 		openaiClient:   &openaiClient,
 		model:          model,
+		apiKey:         apiKey,    // Store API key for settings access
+		baseURL:        baseURL,   // Store base URL for settings access
 		userID:         "user123", // Simple user ID for demo
 		messages:       make([]openai.ChatCompletionMessageParamUnion, 0),
 		tools:          make([]openai.ChatCompletionToolUnionParam, 0),
@@ -163,10 +314,11 @@ func (a *SimpleAgent) showSettingsMenu() error {
 		pterm.FgLightWhite.Println("2. 🖥️  Display Options")
 		pterm.FgLightWhite.Println("3. 💾 Chat Behavior")
 		pterm.FgLightWhite.Println("4. 🔌 MCP Server Settings")
+		pterm.FgLightWhite.Println("5. ⚙️  Configuration (API, URL, Model)")
 		pterm.FgLightWhite.Println("\n0. Back to Chat")
 		pterm.FgLightWhite.Println(strings.Repeat("─", 50))
 
-		pterm.FgLightWhite.Print("Enter your choice (0-4): ")
+		pterm.FgLightWhite.Print("Enter your choice (0-5): ")
 
 		reader := bufio.NewReader(os.Stdin)
 		input, err := reader.ReadString('\n')
@@ -182,7 +334,7 @@ func (a *SimpleAgent) showSettingsMenu() error {
 
 		var choice int
 		_, err = fmt.Sscanf(input, "%d", &choice)
-		if err != nil || choice < 0 || choice > 4 {
+		if err != nil || choice < 0 || choice > 5 {
 			pterm.FgRed.Println("Invalid choice. Please try again.")
 			continue
 		}
@@ -204,8 +356,135 @@ func (a *SimpleAgent) showSettingsMenu() error {
 			if err := a.showMCPServerSettings(); err != nil {
 				pterm.FgRed.Printf("Error in MCP settings: %v\n", err)
 			}
+		case 5:
+			if err := a.showConfigurationSettings(); err != nil {
+				pterm.FgRed.Printf("Error in configuration settings: %v\n", err)
+			}
 		}
 	}
+}
+
+// showConfigurationSettings handles API key, base URL, and model configuration
+func (a *SimpleAgent) showConfigurationSettings() error {
+	// Load current configuration
+	config, err := loadConfig()
+	if err != nil {
+		// If config doesn't exist, create a new one with current values from agent
+		config = &Config{
+			APIKey:  a.apiKey,
+			BaseURL: a.baseURL,
+			Model:   a.model,
+		}
+	}
+
+	pterm.FgLightWhite.Println("\n" + strings.Repeat("═", 50))
+	pterm.FgLightCyan.Println("⚙️  CONFIGURATION SETTINGS")
+	pterm.FgLightWhite.Println(strings.Repeat("─", 50))
+
+	for {
+		pterm.FgLightWhite.Println("\nCurrent configuration:")
+		pterm.FgLightWhite.Printf("1. API Key: %s\n", maskAPIKey(config.APIKey))
+		pterm.FgLightWhite.Printf("2. Base URL: %s\n", config.BaseURL)
+		pterm.FgLightWhite.Printf("3. Model: %s\n", config.Model)
+		pterm.FgLightWhite.Println("\n4. Reset all configuration")
+		pterm.FgLightWhite.Println("\n0. Back to Settings")
+
+		pterm.FgLightWhite.Print("Enter choice (0-4): ")
+
+		reader := bufio.NewReader(os.Stdin)
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+
+		input = strings.TrimSpace(input)
+		if input == "0" {
+			return nil
+		}
+
+		var choice int
+		_, err = fmt.Sscanf(input, "%d", &choice)
+		if err != nil || choice < 1 || choice > 4 {
+			pterm.FgRed.Println("Invalid choice. Please try again.")
+			continue
+		}
+
+		switch choice {
+		case 1:
+			// Change API Key
+			pterm.FgLightWhite.Print("Enter new API Key: ")
+			newAPIKey, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			newAPIKey = strings.TrimSpace(newAPIKey)
+			if newAPIKey != "" {
+				config.APIKey = newAPIKey
+				pterm.FgLightGreen.Printf("✅ API Key updated to: %s\n", maskAPIKey(config.APIKey))
+			}
+		case 2:
+			// Change Base URL
+			pterm.FgLightWhite.Print("Enter new Base URL: ")
+			newBaseURL, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			newBaseURL = strings.TrimSpace(newBaseURL)
+			if newBaseURL != "" {
+				config.BaseURL = newBaseURL
+				pterm.FgLightGreen.Printf("✅ Base URL updated to: %s\n", config.BaseURL)
+			}
+		case 3:
+			// Change Model
+			pterm.FgLightWhite.Print("Enter new Model: ")
+			newModel, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			newModel = strings.TrimSpace(newModel)
+			if newModel != "" {
+				config.Model = newModel
+				pterm.FgLightGreen.Printf("✅ Model updated to: %s\n", config.Model)
+			}
+		case 4:
+			// Reset all configuration
+			pterm.FgLightYellow.Println("This will delete your saved configuration and require re-entry on next startup.")
+			pterm.FgLightWhite.Print("Are you sure? (y/N): ")
+			confirmInput, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+
+			if strings.ToLower(strings.TrimSpace(confirmInput)) == "y" {
+				configPath := getConfigPath()
+				if err := os.Remove(configPath); err != nil && !os.IsNotExist(err) {
+					pterm.FgRed.Printf("Failed to delete config file: %v\n", err)
+				} else {
+					pterm.FgLightGreen.Println("✅ Configuration reset. You'll be prompted for new values on next startup.")
+				}
+			} else {
+				pterm.FgLightCyan.Println("Reset cancelled.")
+			}
+		}
+
+		// Save the updated configuration
+		if err := saveConfig(config); err != nil {
+			pterm.FgLightYellow.Printf("⚠️  Warning: Could not save configuration: %v\n", err)
+		} else {
+			pterm.FgLightCyan.Println("Configuration saved successfully.")
+		}
+
+		pterm.FgLightWhite.Println("Press Enter to continue...")
+		reader.ReadString('\n')
+	}
+}
+
+// maskAPIKey masks the API key for display (shows first 8 and last 4 characters)
+func maskAPIKey(apiKey string) string {
+	if len(apiKey) <= 12 {
+		return "****"
+	}
+	return apiKey[:8] + "****" + apiKey[len(apiKey)-4:]
 }
 
 // showAppearanceSettings handles color customization
@@ -990,44 +1269,22 @@ func (a *SimpleAgent) Close() {
 func main() {
 	ctx := context.Background()
 
-	// Read configuration from the current environment, prompt if missing
-	reader := bufio.NewReader(os.Stdin)
-
 	// Banner
 	letters := putils.LettersFromString("OPEN CODER")
 	_ = pterm.DefaultBigText.WithLetters(letters).Render()
 	_ = pterm.DefaultHeader.WithFullWidth().WithBackgroundStyle(pterm.NewStyle(pterm.BgBlack)).WithMargin(1).Println("Open-Coder: A open source CLI coding Agent")
-	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
-	for apiKey == "" {
-		pterm.FgLightWhite.Print("API Key: ")
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			log.Fatalf("failed to read API key: %v", err)
-		}
-		apiKey = strings.TrimSpace(input)
+
+	// Get configuration (environment variables, config file, or prompt user)
+	config, err := getConfiguration()
+	if err != nil {
+		log.Fatalf("Failed to get configuration: %v", err)
 	}
 
-	baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
-	for baseURL == "" {
-		pterm.FgLightWhite.Print("Base URL: ")
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			log.Fatalf("failed to read base URL: %v", err)
-		}
-		baseURL = strings.TrimSpace(input)
-	}
+	agent := NewSimpleAgent(ctx, config.Model, config.APIKey, config.BaseURL)
 
-	model := strings.TrimSpace(os.Getenv("OPENAI_MODEL"))
-	for model == "" {
-		pterm.FgLightWhite.Print("Model: ")
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			log.Fatalf("failed to read model: %v", err)
-		}
-		model = strings.TrimSpace(input)
-	}
-
-	agent := NewSimpleAgent(ctx, model, apiKey, baseURL)
+	// Store configuration values in agent for settings access
+	agent.apiKey = config.APIKey
+	agent.baseURL = config.BaseURL
 
 	// Initialize conversation with a helpful default system prompt
 	agent.InitConversation("You are a helpful assistant with access to multiple powerful tools. You can use file operations tools to read, write, search, and manage files, as well as terminal command tools to execute any system commands. Always use the appropriate tools when they would help provide accurate information, and think step by step when using tools. Users can type '/settings' to customize the assistant's appearance.")
@@ -1038,27 +1295,65 @@ func main() {
 
 	// Initialize MCP servers quietly (without showing connection details)
 	spinner, _ := pterm.DefaultSpinner.Start("Initializing...")
-	if err := agent.AddMCPServer("file-ops", "/Users/shivanshi/Documents/open-coder/tools/file-access/file-ops-cli", []string{}); err != nil {
-		spinner.Fail(fmt.Sprintf("Failed to initialize: %v", err))
-		agent.getErrorColorStyle().Printf("Failed to connect to file-ops server: %v\n", err)
+
+	// Auto-discover and connect to all MCP servers in installation directory
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		spinner.Fail(fmt.Sprintf("Failed to get home directory: %v", err))
+		log.Fatalf("Failed to get home directory: %v", err)
+	}
+
+	installDir := filepath.Join(homeDir, ".open-coder")
+	connectedServers := 0
+
+	// Scan for all *-cli executables in the installation directory
+	entries, err := os.ReadDir(installDir)
+	if err != nil {
+		spinner.Fail(fmt.Sprintf("Failed to scan installation directory: %v", err))
+		log.Fatalf("Failed to scan installation directory: %v", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "-cli") {
+			continue // Skip directories and non-cli executables
+		}
+
+		serverName := strings.TrimSuffix(entry.Name(), "-cli")
+		serverPath := filepath.Join(installDir, entry.Name())
+
+		// Check if file is executable
+		if info, err := entry.Info(); err == nil {
+			if info.Mode()&0111 == 0 {
+				continue // Skip non-executable files
+			}
+		}
+
+		// Try to connect to the MCP server
+		if err := agent.AddMCPServer(serverName, serverPath, []string{}); err != nil {
+			agent.getErrorColorStyle().Printf("Failed to connect to %s server: %v\n", serverName, err)
+			// Don't exit on individual server failures - continue with others
+		} else {
+			agent.getSystemColorStyle().Printf("🔌 %s server connected\n", serverName)
+			connectedServers++
+		}
+	}
+
+	if connectedServers == 0 {
+		spinner.Fail("No MCP servers found")
+		agent.getErrorColorStyle().Println("No MCP servers were found in the installation directory.")
+		agent.getErrorColorStyle().Println("Make sure tools are built and installed properly.")
 		os.Exit(1)
 	}
-	agent.getSystemColorStyle().Println("📁 File operations server connected")
 
-	if err := agent.AddMCPServer("terminal", "/Users/shivanshi/Documents/open-coder/tools/terminal/terminal-cli", []string{}); err != nil {
-		spinner.Fail(fmt.Sprintf("Failed to initialize: %v", err))
-		agent.getErrorColorStyle().Printf("Failed to connect to terminal server: %v\n", err)
-		os.Exit(1)
-	}
-	agent.getSystemColorStyle().Println("💻 Terminal operations server connected")
-
+	// Refresh tools from all connected servers
 	if err := agent.RefreshTools(); err != nil {
 		spinner.Fail(fmt.Sprintf("Failed to load tools: %v", err))
 		agent.getErrorColorStyle().Printf("Failed to load tools: %v\n", err)
 		os.Exit(1)
 	}
+
 	spinner.Success("Ready")
-	agent.getSystemColorStyle().Println("🛠️  All tools loaded successfully!")
+	agent.getSystemColorStyle().Printf("🛠️  Connected to %d MCP server(s) and loaded all tools successfully!\n", connectedServers)
 
 	// Start interactive chat loop
 	if err := agent.ChatLoop(); err != nil {

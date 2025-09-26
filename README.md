@@ -1,4 +1,5 @@
 # Open Coder 🤖
+![Example Screenshot](example.png)
 
 A powerful AI coding agent that can interact with your codebase through natural language conversations while having full access to create, read, delete, and update files using the Model Context Protocol (MCP).
 
@@ -24,24 +25,31 @@ open-coder/
 ├── go.mod                 # Go module dependencies
 ├── go.sum                 # Dependency checksums
 ├── README.md              # This file
-└── tools/
-    ├── file-access/
-    │   ├── main.go        # MCP server for file operations
-    │   ├── README.md      # File operations documentation
-    │   ├── file-ops-cli   # Compiled binary (after build)
-    │   └── test.txt       # Test file
-    └── terminal/
-        ├── main.go        # MCP server for terminal operations
-        ├── README.md      # Terminal operations documentation
-        └── terminal-cli   # Compiled binary (after build)
+├── install.sh             # One-script installer (builds and installs everything)
+└── tools/                 # MCP server tools directory
+    ├── file-access/       # File operations MCP server
+    │   ├── main.go        # Server implementation
+    │   └── README.md      # Documentation
+    ├── terminal/          # Terminal operations MCP server
+    │   ├── main.go        # Server implementation
+    │   └── README.md      # Documentation
+    └── your-tool/         # Add your own MCP servers here!
+        └── main.go        # Your custom MCP server
 ```
+
+**✨ Dynamic Tool System**: Add any MCP server to the `tools/` directory and it will be automatically:
+- Built by `install.sh`
+- Installed to `~/.open-coder/`
+- Connected by `main.go`
 
 ## 🔧 Tools & Capabilities
 
-### File Operations MCP Server
+Open-Coder automatically discovers and connects to all MCP servers in the `tools/` directory.
 
-The built-in file operations server provides 6 comprehensive file and directory operations:
+### Built-in Tools
 
+#### File Operations MCP Server (`tools/file-access/`)
+Provides 6 comprehensive file and directory operations:
 1. **`read_file`** - Read file contents with optional line ranges
 2. **`write_file`** - Create or overwrite files with content
 3. **`list_directory`** - List directory contents (with recursive option)
@@ -49,20 +57,78 @@ The built-in file operations server provides 6 comprehensive file and directory 
 5. **`search_content`** - Search text within files with context
 6. **`delete_file`** - Delete files/directories (with recursive option)
 
-### Terminal Operations MCP Server
-
-The terminal operations server provides system command execution capabilities:
-
+#### Terminal Operations MCP Server (`tools/terminal/`)
+Provides system command execution capabilities:
 1. **`run_terminal_cmd`** - Execute system commands with arguments
 2. **`run_terminal_cmd_with_input`** - Execute commands with stdin input
+
+### Adding Custom Tools
+
+**✨ Zero Configuration**: Simply add your MCP server to the `tools/` directory:
+
+```
+tools/
+└── my-custom-tool/
+    └── main.go  # Your MCP server implementation
+```
+
+**Example Tool Structure:**
+```go
+// tools/my-custom-tool/main.go
+package main
+
+import (
+    "context"
+    "fmt"
+    "github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+type CustomServer struct{}
+
+func (c *CustomServer) MyCustomFunction(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+    return "Hello from my custom tool!", nil
+}
+
+func main() {
+    server := &CustomServer{}
+
+    mcpServer := mcp.NewServer(&mcp.Implementation{
+        Name: "my-custom-tool",
+        Version: "1.0.0",
+    }, nil)
+
+    // Add your tools here
+    tool := &mcp.Tool{
+        Name:        "my_custom_function",
+        Description: "My custom functionality",
+        InputSchema: map[string]interface{}{
+            "type": "object",
+            "properties": map[string]interface{}{},
+        },
+    }
+
+    mcpServer.AddTool(tool, server.MyCustomFunction)
+
+    // Server will listen for MCP protocol messages
+    mcpServer.Listen(os.Stdin, os.Stdout)
+}
+```
+
+**Automatic Discovery**: The install script and main application will automatically:
+- Build your tool as `my-custom-tool-cli`
+- Install it to `~/.open-coder/`
+- Connect it as an MCP server named `my-custom-tool`
+- Load all its available tools
+
+**Result**: Your custom tool is now available in Open-Coder without any code changes!
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 
-- Go 1.25.1 or later
-- OpenAI API key
-- Terminal access
+- **For building**: Go 1.25.1 or later
+- **For running**: OpenAI API key and terminal access
+- **Standalone executable**: Once built and installed, no Go installation required
 
 ### 1. Clone and Setup
 
@@ -76,32 +142,40 @@ cd /Users/shivanshi/Documents/open-coder
 go mod tidy
 ```
 
-### 3. Build the MCP Tools
+### 3. Install Open-Coder (One Command!)
 
 ```bash
-# Build file operations tool
-cd tools/file-access
-go build -o file-ops-cli main.go
-cd ../..
-
-# Build terminal operations tool
-cd tools/terminal
-go build -o terminal-cli main.go
-cd ../..
+# This builds AND installs everything automatically
+./install.sh
 ```
 
-### 4. Set Environment Variables
+The install script will:
+- ✅ Check for Go installation
+- ✅ **Auto-discover and build ALL tools** in the tools/ directory
+- ✅ Install main application and all MCP servers to ~/.open-coder/
+- ✅ Add to your PATH
+- ✅ Configure environment variables
 
+**✨ Dynamic Tool Discovery**: Any tool added to `tools/tool-name/main.go` will be automatically built and connected!
+
+### 4. Run the Agent
+
+```bash
+open-coder
+```
+
+On first run, you'll be prompted to enter your OpenAI configuration:
+- API Key
+- Base URL
+- Model
+
+This configuration is automatically saved to `~/.open-coder/config` and won't need to be entered again.
+
+You can also set environment variables to override the saved configuration:
 ```bash
 export OPENAI_API_KEY="your-openai-api-key-here"
 export OPENAI_BASE_URL="https://api.openai.com/v1"  # or your custom endpoint
 export OPENAI_MODEL="gpt-4o-mini"  # or your preferred model
-```
-
-### 5. Run the Agent
-
-```bash
-go run main.go
 ```
 
 ## 💬 Usage
@@ -131,6 +205,7 @@ Assistant ▸
   - 🖥️  **Display Options**: Toggle compact mode, timestamps, and hidden file visibility
   - 💾 **Chat Behavior**: Enable/disable auto-save conversations
   - 🔌 **MCP Server Settings**: Manage connected servers and refresh tools
+  - ⚙️  **Configuration**: Update API key, base URL, and model settings
 
 - **`@`** - Open the interactive file browser to select and reference files in your messages
 
@@ -294,6 +369,15 @@ Manage connected MCP servers:
 - View connected servers and their configurations
 - Refresh tool definitions from servers
 - Monitor server status
+
+#### Configuration Settings (⚙️)
+Manage your OpenAI configuration:
+- **Change API Key**: Update your OpenAI API key (displayed masked for security)
+- **Change Base URL**: Modify the API endpoint URL
+- **Change Model**: Switch between different AI models (gpt-4o, gpt-4o-mini, etc.)
+- **Reset Configuration**: Delete saved configuration and re-enter on next startup
+
+**Note**: Changes are automatically saved and take effect immediately. Environment variables still override saved settings.
 
 ### File Browser Integration
 
