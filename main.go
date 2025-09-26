@@ -1121,7 +1121,10 @@ func (a *SimpleAgent) ProcessUserInput(userInput string) error {
 	// Continue conversation loop until no more tool calls are needed
 	for {
 		// Show loading spinner
-		spinner, _ := pterm.DefaultSpinner.Start("Assistant is thinking...")
+		spinner, _ := pterm.DefaultSpinner.
+			WithRemoveWhenDone(true).
+			WithShowTimer(false).
+			Start("")
 
 		// Create streaming request
 		stream := a.openaiClient.Chat.Completions.NewStreaming(a.ctx, openai.ChatCompletionNewParams{
@@ -1163,7 +1166,10 @@ func (a *SimpleAgent) ProcessUserInput(userInput string) error {
 			// Execute tools and add tool messages
 			for _, toolCall := range acc.Choices[0].Message.ToolCalls {
 				if toolCall.Function.Name != "" && toolCall.ID != "" {
-					spinner, _ := pterm.DefaultSpinner.Start(fmt.Sprintf("Running %s", toolCall.Function.Name))
+					spinner, _ := pterm.DefaultSpinner.
+						WithRemoveWhenDone(true).
+						WithShowTimer(false).
+						Start(a.getToolColorStyle().Sprint(fmt.Sprintf("Running %s", toolCall.Function.Name)))
 
 					// Parse arguments
 					var args map[string]any
@@ -1171,6 +1177,9 @@ func (a *SimpleAgent) ProcessUserInput(userInput string) error {
 						spinner.Fail("Failed")
 						continue
 					}
+
+					// Display tool call details in a dotted box before execution
+					a.displayToolCallDetails(toolCall.Function.Name, args)
 
 					// Execute the tool
 					result, err := a.CallTool(toolCall.Function.Name, args)
@@ -1180,8 +1189,10 @@ func (a *SimpleAgent) ProcessUserInput(userInput string) error {
 						result = fmt.Sprintf("Error: %v", err)
 					} else {
 						spinner.Success("Done")
-						a.getToolColorStyle().Printf("Tool '%s' completed successfully\n", toolCall.Function.Name)
 					}
+
+					// Display tool result in a dotted box after execution
+					a.displayToolResult(toolCall.Function.Name, result, err)
 
 					// Add tool message to conversation
 					toolMessage := openai.ToolMessage(fmt.Sprintf("%v", result), toolCall.ID)
@@ -1266,6 +1277,69 @@ func (a *SimpleAgent) Close() {
 	}
 }
 
+// displayToolCallDetails displays tool call arguments in a dotted border box
+func (a *SimpleAgent) displayToolCallDetails(toolName string, args map[string]any) {
+	a.getToolColorStyle().Println("\n" + strings.Repeat("┌", 60))
+	a.getToolColorStyle().Printf("│ 🔧 Tool Call: %s\n", toolName)
+	a.getToolColorStyle().Println(strings.Repeat("├", 60))
+
+	if len(args) == 0 {
+		a.getSystemColorStyle().Println("│ 📝 Arguments: None")
+	} else {
+		a.getSystemColorStyle().Println("│ 📝 Arguments:")
+
+		// Pretty print arguments with indentation
+		argsJSON, _ := json.MarshalIndent(args, "│   ", "  ")
+		argsStr := string(argsJSON)
+
+		// Split into lines and add proper indentation
+		lines := strings.Split(argsStr, "\n")
+		for _, line := range lines {
+			if line != "" {
+				a.getSystemColorStyle().Println("│   " + line)
+			}
+		}
+	}
+
+	a.getToolColorStyle().Println(strings.Repeat("└", 60))
+}
+
+// displayToolResult displays the result of a tool call in a formatted box
+func (a *SimpleAgent) displayToolResult(toolName string, result interface{}, err error) {
+	a.getToolColorStyle().Println("\n" + strings.Repeat("┌", 60))
+	a.getToolColorStyle().Printf("│ ✅ Tool Result: %s\n", toolName)
+	a.getToolColorStyle().Println(strings.Repeat("├", 60))
+
+	if err != nil {
+		a.getErrorColorStyle().Printf("│ ❌ Error: %v\n", err)
+	} else {
+		a.getSystemColorStyle().Println("│ 📄 Output:")
+
+		// Convert result to string and format it nicely
+		resultStr := fmt.Sprintf("%v", result)
+
+		// If it's a long result, split it into lines
+		if len(resultStr) > 50 {
+			lines := strings.Split(resultStr, "\n")
+			for i, line := range lines {
+				if i < 10 { // Limit to first 10 lines to avoid overwhelming output
+					a.getSystemColorStyle().Println("│   " + line)
+				} else if i == 10 {
+					a.getSystemColorStyle().Println("│   ... (truncated)")
+					break
+				}
+			}
+		} else {
+			lines := strings.Split(resultStr, "\n")
+			for _, line := range lines {
+				a.getSystemColorStyle().Println("│   " + line)
+			}
+		}
+	}
+
+	a.getToolColorStyle().Println(strings.Repeat("└", 60))
+}
+
 func main() {
 	ctx := context.Background()
 
@@ -1333,7 +1407,6 @@ func main() {
 			agent.getErrorColorStyle().Printf("Failed to connect to %s server: %v\n", serverName, err)
 			// Don't exit on individual server failures - continue with others
 		} else {
-			agent.getSystemColorStyle().Printf("🔌 %s server connected\n", serverName)
 			connectedServers++
 		}
 	}
@@ -1352,8 +1425,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	spinner.Success("Ready")
-	agent.getSystemColorStyle().Printf("🛠️  Connected to %d MCP server(s) and loaded all tools successfully!\n", connectedServers)
+	spinner.Success(fmt.Sprintf("Ready · %d servers", connectedServers))
 
 	// Start interactive chat loop
 	if err := agent.ChatLoop(); err != nil {
