@@ -22,7 +22,9 @@ func main() {
 
 	// Add file operation tools
 	s.AddTool(createReadFileTool(), readFileHandler)
+	s.AddTool(createReadLineRangeTool(), readLineRangeHandler)
 	s.AddTool(createWriteFileTool(), writeFileHandler)
+	s.AddTool(createEditLineRangeTool(), editLineRangeHandler)
 	s.AddTool(createListDirectoryTool(), listDirectoryHandler)
 	s.AddTool(createSearchFilesTool(), searchFilesHandler)
 	s.AddTool(createSearchContentTool(), searchContentHandler)
@@ -36,7 +38,7 @@ func main() {
 
 func createReadFileTool() mcp.Tool {
 	return mcp.NewTool("read_file",
-		mcp.WithDescription("Read the contents of a file"),
+		mcp.WithDescription("Read the contents of a file with optional line numbers"),
 		mcp.WithString("path",
 			mcp.Required(),
 			mcp.Description("Path to the file to read (relative to current directory)"),
@@ -46,6 +48,9 @@ func createReadFileTool() mcp.Tool {
 		),
 		mcp.WithNumber("limit",
 			mcp.Description("Number of lines to read (optional, reads entire file if not specified)"),
+		),
+		mcp.WithBoolean("show_line_numbers",
+			mcp.Description("Whether to include line numbers in the output (default: false)"),
 		),
 	)
 }
@@ -121,6 +126,50 @@ func createDeleteFileTool() mcp.Tool {
 	)
 }
 
+func createReadLineRangeTool() mcp.Tool {
+	return mcp.NewTool("read_line_range",
+		mcp.WithDescription("Read specific lines or a range of lines from a file"),
+		mcp.WithString("path",
+			mcp.Required(),
+			mcp.Description("Path to the file to read (relative to current directory)"),
+		),
+		mcp.WithNumber("start_line",
+			mcp.Required(),
+			mcp.Description("Starting line number (1-based)"),
+		),
+		mcp.WithNumber("end_line",
+			mcp.Description("Ending line number (1-based, optional - if not provided, reads only the start_line)"),
+		),
+		mcp.WithBoolean("show_line_numbers",
+			mcp.Description("Whether to include line numbers in the output (default: true)"),
+		),
+	)
+}
+
+func createEditLineRangeTool() mcp.Tool {
+	return mcp.NewTool("edit_line_range",
+		mcp.WithDescription("Edit specific lines or a range of lines in a file"),
+		mcp.WithString("path",
+			mcp.Required(),
+			mcp.Description("Path to the file to edit (relative to current directory)"),
+		),
+		mcp.WithNumber("start_line",
+			mcp.Required(),
+			mcp.Description("Starting line number to edit (1-based)"),
+		),
+		mcp.WithNumber("end_line",
+			mcp.Description("Ending line number to edit (1-based, optional - if not provided, edits only the start_line)"),
+		),
+		mcp.WithString("content",
+			mcp.Required(),
+			mcp.Description("New content to replace the specified lines (use \\n for line breaks)"),
+		),
+		mcp.WithString("operation",
+			mcp.Description("Operation type: 'replace' (default), 'insert_before', or 'insert_after'"),
+		),
+	)
+}
+
 func readFileHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path := mcp.ParseString(request, "path", "")
 	if path == "" {
@@ -133,6 +182,8 @@ func readFileHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 	}
 
 	limit := mcp.ParseInt(request, "limit", -1)
+
+	showLineNumbers := mcp.ParseBoolean(request, "show_line_numbers", false)
 
 	// Resolve path relative to current working directory
 	absPath, err := filepath.Abs(path)
@@ -161,7 +212,18 @@ func readFileHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 	}
 
 	resultLines := lines[offset:end]
-	result := strings.Join(resultLines, "\n")
+
+	var result string
+	if showLineNumbers {
+		var formattedLines []string
+		for i, line := range resultLines {
+			lineNum := offset + i + 1
+			formattedLines = append(formattedLines, fmt.Sprintf("%4d: %s", lineNum, line))
+		}
+		result = strings.Join(formattedLines, "\n")
+	} else {
+		result = strings.Join(resultLines, "\n")
+	}
 
 	return mcp.NewToolResultText(result), nil
 }
@@ -523,4 +585,157 @@ func deleteFileHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.C
 	}
 
 	return mcp.NewToolResultText(result), nil
+}
+
+func readLineRangeHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	path := mcp.ParseString(request, "path", "")
+	if path == "" {
+		return mcp.NewToolResultError("path parameter is required"), nil
+	}
+
+	startLine := mcp.ParseInt(request, "start_line", 1)
+	if startLine < 1 {
+		return mcp.NewToolResultError("start_line must be >= 1"), nil
+	}
+
+	endLine := mcp.ParseInt(request, "end_line", startLine)
+	if endLine < startLine {
+		return mcp.NewToolResultError("end_line must be >= start_line"), nil
+	}
+
+	showLineNumbers := mcp.ParseBoolean(request, "show_line_numbers", true)
+
+	// Resolve path relative to current working directory
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid path: %v", err)), nil
+	}
+
+	content, err := os.ReadFile(absPath)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to read file: %v", err)), nil
+	}
+
+	lines := strings.Split(string(content), "\n")
+
+	// Adjust to 0-based indexing
+	startIdx := startLine - 1
+	endIdx := endLine
+
+	// Handle bounds
+	if startIdx >= len(lines) {
+		return mcp.NewToolResultText(""), nil
+	}
+
+	if endIdx > len(lines) {
+		endIdx = len(lines)
+	}
+
+	resultLines := lines[startIdx:endIdx]
+
+	var result string
+	if showLineNumbers {
+		var formattedLines []string
+		for i, line := range resultLines {
+			lineNum := startIdx + i + 1
+			formattedLines = append(formattedLines, fmt.Sprintf("%4d: %s", lineNum, line))
+		}
+		result = strings.Join(formattedLines, "\n")
+	} else {
+		result = strings.Join(resultLines, "\n")
+	}
+
+	return mcp.NewToolResultText(result), nil
+}
+
+func editLineRangeHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	path := mcp.ParseString(request, "path", "")
+	if path == "" {
+		return mcp.NewToolResultError("path parameter is required"), nil
+	}
+
+	startLine := mcp.ParseInt(request, "start_line", 1)
+	if startLine < 1 {
+		return mcp.NewToolResultError("start_line must be >= 1"), nil
+	}
+
+	endLine := mcp.ParseInt(request, "end_line", startLine)
+	if endLine < startLine {
+		return mcp.NewToolResultError("end_line must be >= start_line"), nil
+	}
+
+	content := mcp.ParseString(request, "content", "")
+	if content == "" {
+		return mcp.NewToolResultError("content parameter is required"), nil
+	}
+
+	operation := mcp.ParseString(request, "operation", "replace")
+
+	// Resolve path relative to current working directory
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid path: %v", err)), nil
+	}
+
+	// Read current file content
+	currentContent, err := os.ReadFile(absPath)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to read file: %v", err)), nil
+	}
+
+	lines := strings.Split(string(currentContent), "\n")
+	newContentLines := strings.Split(content, "\n")
+
+	// Adjust to 0-based indexing
+	startIdx := startLine - 1
+	endIdx := endLine
+
+	// Handle bounds
+	if startIdx > len(lines) {
+		return mcp.NewToolResultError(fmt.Sprintf("start_line %d exceeds file length (%d lines)", startLine, len(lines))), nil
+	}
+
+	if endIdx > len(lines) {
+		endIdx = len(lines)
+	}
+
+	var resultLines []string
+
+	switch operation {
+	case "replace":
+		// Replace the specified range with new content
+		resultLines = append(resultLines, lines[:startIdx]...)
+		resultLines = append(resultLines, newContentLines...)
+		resultLines = append(resultLines, lines[endIdx:]...)
+
+	case "insert_before":
+		// Insert new content before the specified line
+		resultLines = append(resultLines, lines[:startIdx]...)
+		resultLines = append(resultLines, newContentLines...)
+		resultLines = append(resultLines, lines[startIdx:]...)
+
+	case "insert_after":
+		// Insert new content after the specified line (or range)
+		resultLines = append(resultLines, lines[:endIdx]...)
+		resultLines = append(resultLines, newContentLines...)
+		resultLines = append(resultLines, lines[endIdx:]...)
+
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid operation: %s. Must be 'replace', 'insert_before', or 'insert_after'", operation)), nil
+	}
+
+	result := strings.Join(resultLines, "\n")
+
+	// Ensure directory exists
+	dir := filepath.Dir(absPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to create directory: %v", err)), nil
+	}
+
+	err = os.WriteFile(absPath, []byte(result), 0644)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to write file: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Successfully edited lines %d-%d in %s using operation '%s'", startLine, endLine, path, operation)), nil
 }
