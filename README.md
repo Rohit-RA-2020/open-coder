@@ -49,13 +49,15 @@ Open-Coder automatically discovers and connects to all MCP servers in the `tools
 ### Built-in Tools
 
 #### File Operations MCP Server (`tools/file-access/`)
-Provides 6 comprehensive file and directory operations:
+Provides 8 comprehensive file and directory operations:
 1. **`read_file`** - Read file contents with optional line ranges
-2. **`write_file`** - Create or overwrite files with content
-3. **`list_directory`** - List directory contents (with recursive option)
-4. **`search_files`** - Find files by name patterns using glob syntax
-5. **`search_content`** - Search text within files with context
-6. **`delete_file`** - Delete files/directories (with recursive option)
+2. **`read_line_range`** - Read specific lines or a range from a file
+3. **`write_file`** - Create or overwrite files with content
+4. **`edit_line_range`** - Edit specific lines or a range in a file
+5. **`list_directory`** - List directory contents (with recursive option)
+6. **`search_files`** - Find files by name patterns using glob syntax
+7. **`search_content`** - Search text within files with context
+8. **`delete_file`** - Delete files/directories (with recursive option)
 
 #### Terminal Operations MCP Server (`tools/terminal/`)
 Provides system command execution capabilities:
@@ -269,11 +271,32 @@ Assistant:
   }
   ```
 
+- **`read_line_range`** - Read specific lines or a range from a file
+  ```json
+  {
+    "path": "example.py",
+    "start_line": 5,
+    "end_line": 15,
+    "show_line_numbers": true
+  }
+  ```
+
 - **`write_file`** - Create or update files
   ```json
   {
     "path": "new_file.txt",
     "content": "Hello, World!"
+  }
+  ```
+
+- **`edit_line_range`** - Edit specific lines or a range in a file
+  ```json
+  {
+    "path": "src/main.go",
+    "start_line": 10,
+    "end_line": 12,
+    "content": "new line 1\\nnew line 2",
+    "operation": "replace"
   }
   ```
 
@@ -380,7 +403,6 @@ Manage your OpenAI configuration:
 **Note**: Changes are automatically saved and take effect immediately. Environment variables still override saved settings.
 
 ### File Browser Integration
-
 Use the `@` command to interactively browse and select files to reference in your messages:
 
 ```
