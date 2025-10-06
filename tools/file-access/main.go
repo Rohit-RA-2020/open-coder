@@ -1,16 +1,65 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/qdrant/go-client/qdrant"
 )
+
+// OpenCoderConfig represents the JSON configuration structure
+type OpenCoderConfig struct {
+	Indexer struct {
+		Embedding struct {
+			BaseURL string `json:"base_url"`
+			APIKey  string `json:"api_key"`
+			Model   string `json:"model"`
+		} `json:"embedding"`
+		Qdrant struct {
+			Host string `json:"host"`
+			Port string `json:"port"`
+		} `json:"qdrant"`
+		VectorDimensions string `json:"vector_dimensions"`
+	} `json:"indexer"`
+}
+
+// loadJSONConfig loads configuration from the JSON config file
+func loadJSONConfig() (*OpenCoderConfig, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+
+	configPath := filepath.Join(homeDir, ".open-coder", "config")
+
+	// Check if config file exists
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		return nil, err
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var config OpenCoderConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
 
 func main() {
 	// Create a new MCP server
@@ -29,6 +78,7 @@ func main() {
 	s.AddTool(createSearchFilesTool(), searchFilesHandler)
 	s.AddTool(createSearchContentTool(), searchContentHandler)
 	s.AddTool(createDeleteFileTool(), deleteFileHandler)
+	s.AddTool(createSemanticSearchTool(), semanticSearchHandler)
 
 	// Start the stdio server
 	if err := server.ServeStdio(s); err != nil {
@@ -166,6 +216,23 @@ func createEditLineRangeTool() mcp.Tool {
 		),
 		mcp.WithString("operation",
 			mcp.Description("Operation type: 'replace' (default), 'insert_before', or 'insert_after'"),
+		),
+	)
+}
+
+func createSemanticSearchTool() mcp.Tool {
+	return mcp.NewTool("semantic_search",
+		mcp.WithDescription("Perform semantic search on indexed code using vector embeddings"),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("Search query to find semantically similar code"),
+		),
+		mcp.WithString("collection",
+			mcp.Required(),
+			mcp.Description("Collection name (directory path) to search in"),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Maximum number of results to return (default: 2, max: 10)"),
 		),
 	)
 }
@@ -738,4 +805,287 @@ func editLineRangeHandler(ctx context.Context, request mcp.CallToolRequest) (*mc
 	}
 
 	return mcp.NewToolResultText(fmt.Sprintf("Successfully edited lines %d-%d in %s using operation '%s'", startLine, endLine, path, operation)), nil
+}
+
+func semanticSearchHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	query := mcp.ParseString(request, "query", "")
+	if query == "" {
+		return mcp.NewToolResultError("query parameter is required"), nil
+	}
+
+	collection := mcp.ParseString(request, "collection", "")
+	if collection == "" {
+		return mcp.NewToolResultError("collection parameter is required"), nil
+	}
+
+	limit := mcp.ParseInt(request, "limit", 2)
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 10 {
+		limit = 10
+	}
+
+	// If collection is ".", resolve to current directory absolute path
+	if collection == "." {
+		currentDir, err := os.Getwd()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to get current directory: %v", err)), nil
+		}
+		collection = sanitizeCollectionName(currentDir)
+	}
+
+	// Create embedding for the query
+	embedding, err := createEmbeddingForQuery(ctx, query)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to create embedding for query: %v", err)), nil
+	}
+
+	// Create Qdrant client using JSON config or environment variables
+	var qdrantHost string
+	var qdrantPort int
+
+	// First priority: JSON config file
+	jsonConfig, err := loadJSONConfig()
+	if err == nil {
+		qdrantHost = jsonConfig.Indexer.Qdrant.Host
+		if jsonConfig.Indexer.Qdrant.Port != "" {
+			if port, err := strconv.Atoi(jsonConfig.Indexer.Qdrant.Port); err == nil {
+				qdrantPort = port
+			}
+		}
+	}
+
+	// Second priority: environment variables (can override JSON config)
+	if qdrantHost == "" {
+		qdrantHost = getEnv("QDRANT_HOST", "localhost")
+	}
+	if qdrantPort == 0 {
+		qdrantPort = getEnvAsInt("QDRANT_PORT", 6334)
+	}
+
+	qdrantClient, err := qdrant.NewClient(&qdrant.Config{
+		Host: qdrantHost,
+		Port: qdrantPort,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to connect to Qdrant: %v", err)), nil
+	}
+
+	// Perform semantic search
+	limitUint64 := uint64(limit)
+	results, err := qdrantClient.Query(ctx, &qdrant.QueryPoints{
+		CollectionName: collection,
+		Query:          qdrant.NewQuery(embedding...),
+		WithPayload:    qdrant.NewWithPayload(true),
+		Limit:          &limitUint64,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to perform semantic search: %v", err)), nil
+	}
+
+	// Format results
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("Semantic search results for query: '%s'\n", query))
+	result.WriteString(fmt.Sprintf("Collection: %s\n", collection))
+	result.WriteString("----------------------------------------\n\n")
+
+	if len(results) == 0 {
+		result.WriteString("No results found.")
+		return mcp.NewToolResultText(result.String()), nil
+	}
+
+	for i, point := range results {
+		result.WriteString(fmt.Sprintf("Result %d (Score: %.4f):\n", i+1, point.Score))
+
+		// Extract payload information
+		if point.Payload != nil {
+			// Access payload values using the proper Qdrant value extraction
+			if filenameVal, ok := point.Payload["filename"]; ok && filenameVal != nil {
+				if filenameStr := filenameVal.GetStringValue(); filenameStr != "" {
+					result.WriteString(fmt.Sprintf("  File: %s\n", filenameStr))
+				}
+			}
+
+			var startLineValue, endLineValue float64
+			if startLineVal, ok := point.Payload["start_line"]; ok && startLineVal != nil {
+				startLineValue = startLineVal.GetDoubleValue()
+			}
+			if endLineVal, ok := point.Payload["end_line"]; ok && endLineVal != nil {
+				endLineValue = endLineVal.GetDoubleValue()
+			}
+
+			if startLineValue > 0 {
+				endLine := startLineValue
+				if endLineValue > 0 {
+					endLine = endLineValue
+				}
+				result.WriteString(fmt.Sprintf("  Lines: %.0f-%.0f\n", startLineValue, endLine))
+			}
+
+			if summaryVal, ok := point.Payload["summary"]; ok && summaryVal != nil {
+				if summaryStr := summaryVal.GetStringValue(); summaryStr != "" {
+					result.WriteString(fmt.Sprintf("  Summary: %s\n", summaryStr))
+				}
+			}
+		}
+		result.WriteString("\n")
+	}
+
+	return mcp.NewToolResultText(result.String()), nil
+}
+
+// sanitizeCollectionName creates a valid collection name from a path (similar to indexer package)
+func sanitizeCollectionName(path string) string {
+	name := strings.ReplaceAll(path, "/", "_")
+	name = strings.ReplaceAll(name, "\\", "_")
+	name = strings.ReplaceAll(name, " ", "_")
+	name = strings.ReplaceAll(name, ":", "_")
+	return "codebase" + name
+}
+
+// createEmbeddingForQuery creates an embedding for the search query using JSON config or environment credentials
+func createEmbeddingForQuery(ctx context.Context, query string) ([]float32, error) {
+	// Find and load .env file by walking up directory tree (for backward compatibility)
+	loadEnvFileFromProjectRoot()
+
+	// Initialize variables with defaults
+	var embeddingEndpoint, embeddingAPIKey, embeddingModel string
+	var vectorDimensions int
+
+	// First priority: JSON config file
+	jsonConfig, err := loadJSONConfig()
+	if err == nil {
+		embeddingEndpoint = jsonConfig.Indexer.Embedding.BaseURL
+		embeddingAPIKey = jsonConfig.Indexer.Embedding.APIKey
+		embeddingModel = jsonConfig.Indexer.Embedding.Model
+		if jsonConfig.Indexer.VectorDimensions != "" {
+			if dims, err := strconv.Atoi(jsonConfig.Indexer.VectorDimensions); err == nil {
+				vectorDimensions = dims
+			}
+		}
+	}
+
+	// Second priority: environment variables (can override JSON config)
+	if embeddingEndpoint == "" {
+		embeddingEndpoint = getEnv("EMBEDDING_BASE_URL", "")
+	}
+	if embeddingAPIKey == "" {
+		embeddingAPIKey = getEnv("EMBEDDING_API_KEY", "")
+	}
+	if embeddingModel == "" {
+		embeddingModel = getEnv("EMBEDDING_MODEL", "text-embedding-3-small")
+	}
+	if vectorDimensions == 0 {
+		vectorDimensions = getEnvAsInt("VECTOR_DIMENSIONS", 1536)
+	}
+
+	if embeddingEndpoint == "" {
+		return nil, fmt.Errorf("EMBEDDING_BASE_URL not set in config file or environment")
+	}
+
+	if embeddingAPIKey == "" {
+		return nil, fmt.Errorf("EMBEDDING_API_KEY not set in config file or environment")
+	}
+
+	embeddingClient := openai.NewClient(
+		option.WithBaseURL(embeddingEndpoint),
+		option.WithAPIKey(embeddingAPIKey),
+	)
+
+	embedding, err := embeddingClient.Embeddings.New(ctx, openai.EmbeddingNewParams{
+		Input: openai.EmbeddingNewParamsInputUnion{
+			OfString: openai.String(query),
+		},
+		Model:          openai.EmbeddingModel(embeddingModel),
+		Dimensions:     openai.Int(int64(vectorDimensions)),
+		EncodingFormat: openai.EmbeddingNewParamsEncodingFormatFloat,
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	embeddingData := embedding.Data[0].Embedding
+	embedding32 := make([]float32, len(embeddingData))
+	for i, v := range embeddingData {
+		embedding32[i] = float32(v)
+	}
+
+	return embedding32, nil
+}
+
+// getEnv gets an environment variable with a default value
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// getEnvAsInt gets an environment variable as integer with a default value
+func getEnvAsInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if intValue, err := strconv.Atoi(value); err == nil {
+			return intValue
+		}
+	}
+	return defaultValue
+}
+
+// loadEnvFileFromProjectRoot finds and loads .env file by walking up directory tree
+func loadEnvFileFromProjectRoot() {
+	// Start from current directory and walk up until we find .env or reach root
+	dir, err := os.Getwd()
+	if err != nil {
+		return
+	}
+
+	for {
+		envPath := filepath.Join(dir, ".env")
+		loadEnvFile(envPath)
+
+		// Move to parent directory
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached root directory
+			break
+		}
+		dir = parent
+	}
+}
+
+// loadEnvFile loads environment variables from a .env file
+func loadEnvFile(filename string) {
+	file, err := os.Open(filename)
+	if err != nil {
+		// .env file doesn't exist, that's okay
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Parse KEY=VALUE format
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+
+			// Remove quotes if present
+			if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') ||
+				(value[0] == '\'' && value[len(value)-1] == '\'')) {
+				value = value[1 : len(value)-1]
+			}
+
+			os.Setenv(key, value)
+		}
+	}
 }

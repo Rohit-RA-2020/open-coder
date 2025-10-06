@@ -13,6 +13,7 @@ A powerful AI coding agent that can interact with your codebase through natural 
 - **Multi-server Support**: Connect to multiple MCP servers simultaneously
 - **Interactive Settings Menu**: Customize colors, display options, and chat behavior
 - **File Browser Integration**: Use `@` command to interactively browse and reference files
+- **Codebase Indexing**: Use `/index` command to index your codebase for semantic search with vector embeddings
 - **Color Customization**: Personalize the appearance with different color schemes
 - **Display Options**: Toggle compact mode, timestamps, and hidden file visibility
 - **Auto-save Conversations**: Automatically save chat history to files
@@ -26,6 +27,14 @@ open-coder/
 ├── go.sum                 # Dependency checksums
 ├── README.md              # This file
 ├── install.sh             # One-script installer (builds and installs everything)
+├── pkg/                   # Reusable packages
+│   └── indexer/          # Codebase indexing package
+│       ├── config.go      # Configuration management
+│       ├── scanner.go     # File discovery
+│       ├── chunker.go     # File chunking logic
+│       ├── indexer.go     # Main indexing orchestration
+│       ├── config.example.go  # Example configurations
+│       └── README.md      # Indexer documentation
 └── tools/                 # MCP server tools directory
     ├── file-access/       # File operations MCP server
     │   ├── main.go        # Server implementation
@@ -180,6 +189,8 @@ export OPENAI_BASE_URL="https://api.openai.com/v1"  # or your custom endpoint
 export OPENAI_MODEL="gpt-4o-mini"  # or your preferred model
 ```
 
+**Note**: The `/index` feature uses dedicated Azure OpenAI endpoints that are pre-configured in the code.
+
 ## 💬 Usage
 
 Once running, the agent provides an interactive chat interface:
@@ -209,6 +220,14 @@ Assistant ▸
   - 🔌 **MCP Server Settings**: Manage connected servers and refresh tools
   - ⚙️  **Configuration**: Update API key, base URL, and model settings
 
+- **`/index`** - Index the current codebase for semantic search:
+  - 📂 Recursively discovers all code files in the current directory
+  - 📝 Breaks files into chunks of 100 lines with 10 line overlap
+  - 🤖 Generates AI summaries with code descriptions and pseudo code
+  - 🔢 Creates vector embeddings from summaries
+  - 💾 Stores in Qdrant vector database for semantic search
+  - 🔍 Enables powerful code search capabilities
+
 - **`@`** - Open the interactive file browser to select and reference files in your messages
 
 ### Basic File Operations
@@ -235,6 +254,53 @@ Assistant:
 ⚙️  Calling: search_files
 ✅ Tool completed: search_files
 ```
+
+### Codebase Indexing with `/index`
+
+The `/index` command creates a semantic search index of your entire codebase:
+
+```
+You > /index
+
+📂 Indexing codebase at: /home/user/project
+This will:
+  • Discover all code files recursively
+  • Break them into chunks of 100 lines (with 10 line overlap)
+  • Generate summaries and embeddings
+  • Store in Qdrant vector database
+
+Do you want to continue? (y/N): y
+
+Collection name: codebase_home_user_project
+Creating new collection...
+✅ Collection created successfully
+
+📊 Found 15 code files to index
+
+Indexing files ████████████████████ 100%
+
+✅ Indexing complete! Processed 47 chunks from 15 files
+📦 Collection: codebase_home_user_project
+```
+
+**How it works:**
+1. **File Discovery**: Scans all code files (.go, .py, .js, .ts, etc.) in the current directory
+2. **Chunking**: Breaks each file into overlapping chunks (0-100, 90-190, 180-280, etc.)
+3. **Summarization**: Uses AI to create concise summaries with pseudo code for each chunk
+4. **Embedding**: Generates vector embeddings from summaries using OpenAI's text-embedding-3-small
+5. **Storage**: Stores vectors in Qdrant with metadata (filename, line range, summary)
+
+**Collection Naming**: Collections are named based on the absolute path of the directory (e.g., `codebase_home_user_project`)
+
+**Requirements**: 
+- Qdrant running on `localhost:6334`
+- The indexing feature uses pre-configured Azure OpenAI endpoints
+
+**Customization**: The indexing logic is modular and located in `pkg/indexer/`. You can easily:
+- Modify file extensions to index (`config.go`)
+- Add/remove ignored directories and patterns (`config.go`)
+- Adjust chunk size and overlap (`config.go`)
+- See `pkg/indexer/README.md` for detailed customization options for summary generation and embeddings
 
 ### Advanced Usage with File Browser
 
@@ -434,9 +500,11 @@ Navigation: [number] Select | [..] Parent dir | [~] Home | [.] Current dir | [/]
 
 | Variable | Description | Required | Default |
 |----------|-------------|----------|---------|
-| `OPENAI_API_KEY` | Your OpenAI API key | ✅ | - |
-| `OPENAI_BASE_URL` | API endpoint URL | ✅ | - |
-| `OPENAI_MODEL` | Model to use | ✅ | - |
+| `OPENAI_API_KEY` | Your OpenAI API key (for chat) | ✅ | - |
+| `OPENAI_BASE_URL` | API endpoint URL (for chat) | ✅ | - |
+| `OPENAI_MODEL` | Model to use (for chat) | ✅ | - |
+
+**Note**: Indexing uses pre-configured Azure OpenAI endpoints.
 
 ### Supported Models
 
@@ -564,6 +632,23 @@ This project is open source and available under the MIT License.
    - Some terminals may not support all color options
    - Try different color schemes in appearance settings
 
+8. **Indexing (`/index`) fails or times out**
+   - Ensure Qdrant is running on `localhost:6334` (default port)
+   - Check your OpenAI API key and quota
+   - For large codebases, indexing may take a while - be patient
+   - Verify you have write permissions in the current directory
+
+9. **"Failed to connect to Qdrant"**
+   - Install and start Qdrant: `docker run -p 6334:6334 qdrant/qdrant`
+   - Or download from: https://qdrant.tech/documentation/quick-start/
+   - Verify Qdrant is accessible at `localhost:6334`
+
+10. **"Failed to generate embedding" errors during indexing**
+   - The indexing feature uses pre-configured Azure OpenAI endpoints
+   - Ensure Qdrant is running and accessible
+   - Check network connectivity to Azure OpenAI endpoints
+   - The endpoints and API keys are hardcoded in the agent initialization
+
 ### Getting Help
 
 - Check the error messages for specific guidance
@@ -580,6 +665,8 @@ This project is open source and available under the MIT License.
 - **Testing**: Generate test files and data
 - **System Administration**: Execute terminal commands and scripts
 - **Interactive Development**: Browse and reference files during conversations
+- **Semantic Code Search**: Index and search codebases using AI-powered vector embeddings
+- **Knowledge Base Creation**: Build searchable knowledge bases from your code
 - **Customizable Workflow**: Personalize the interface with colors and display options
 - **Multi-server Toolchains**: Combine multiple MCP servers for complex tasks
 

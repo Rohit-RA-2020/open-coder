@@ -11,9 +11,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"open-coder/pkg/indexer"
+
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/openai/openai-go/v2"
-	"github.com/openai/openai-go/v2/option"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 	"github.com/pterm/pterm"
 	"github.com/pterm/pterm/putils"
 )
@@ -1219,7 +1221,7 @@ func (a *SimpleAgent) ChatLoop() error {
 	reader := bufio.NewReader(os.Stdin)
 
 	_ = pterm.DefaultHeader.WithFullWidth().WithBackgroundStyle(pterm.NewStyle(pterm.BgBlack)).WithMargin(1).Println("OPEN CODER")
-	a.getSystemColorStyle().Println("Type 'exit', 'quit' to end conversation, '/settings' to customize appearance, or '@' to browse files")
+	a.getSystemColorStyle().Println("Type 'exit', 'quit' to end conversation, '/settings' to customize appearance, '/index' to index codebase, or '@' to browse files")
 	pterm.Println(strings.Repeat("─", 50))
 
 	for {
@@ -1240,6 +1242,12 @@ func (a *SimpleAgent) ChatLoop() error {
 		if lower == "/settings" {
 			if err := a.showSettingsMenu(); err != nil {
 				a.getErrorColorStyle().Printf("Settings error: %v\n", err)
+			}
+			continue
+		}
+		if lower == "/index" {
+			if err := a.indexCodebase(); err != nil {
+				a.getErrorColorStyle().Printf("Indexing error: %v\n", err)
 			}
 			continue
 		}
@@ -1340,6 +1348,46 @@ func (a *SimpleAgent) displayToolResult(toolName string, result interface{}, err
 	a.getToolColorStyle().Println(strings.Repeat("└", 60))
 }
 
+// indexCodebase indexes the current directory codebase
+func (a *SimpleAgent) indexCodebase() error {
+	// Get current working directory
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Ask for confirmation
+	a.getSystemColorStyle().Printf("\n📂 Indexing codebase at: %s\n", cwd)
+	a.getSystemColorStyle().Println("This will:")
+	a.getSystemColorStyle().Println("  • Discover all code files recursively")
+	a.getSystemColorStyle().Println("  • Break them into chunks of 100 lines (with 10 line overlap)")
+	a.getSystemColorStyle().Println("  • Generate summaries and embeddings")
+	a.getSystemColorStyle().Println("  • Store in Qdrant vector database")
+	a.getSystemColorStyle().Print("\nDo you want to continue? (y/N): ")
+
+	reader := bufio.NewReader(os.Stdin)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		return err
+	}
+
+	response = strings.ToLower(strings.TrimSpace(response))
+	if response != "y" && response != "yes" {
+		a.getSystemColorStyle().Println("Indexing cancelled.")
+		return nil
+	}
+
+	// Create indexer with environment-based config
+	config := indexer.LoadConfigFromEnv()
+	idx, err := indexer.NewIndexer(config)
+	if err != nil {
+		return fmt.Errorf("failed to create indexer: %w", err)
+	}
+
+	// Index the directory
+	return idx.IndexDirectory(a.ctx, cwd)
+}
+
 func main() {
 	ctx := context.Background()
 
@@ -1361,11 +1409,11 @@ func main() {
 	agent.baseURL = config.BaseURL
 
 	// Initialize conversation with a helpful default system prompt
-	agent.InitConversation("You are a helpful assistant with access to multiple powerful tools. You can use file operations tools to read, write, search, and manage files, as well as terminal command tools to execute any system commands. Always use the appropriate tools when they would help provide accurate information, and think step by step when using tools. Users can type '/settings' to customize the assistant's appearance.")
+	agent.InitConversation("You are a helpful assistant with access to multiple powerful tools. You can use file operations tools to read, write, search, and manage files, as well as terminal command tools to execute any system commands. Always use the appropriate tools when they would help provide accurate information, and think step by step when using tools. Users can type '/settings' to customize the assistant's appearance, '/index' to index the codebase for semantic search, or '@' to browse files.")
 
 	// Display welcome message with system color
 	agent.getSystemColorStyle().Println("🤖 Assistant initialized successfully!")
-	agent.getSystemColorStyle().Printf("💡 Type '/settings' to customize appearance or '@' to browse and reference files\n")
+	agent.getSystemColorStyle().Printf("💡 Type '/settings' to customize appearance, '/index' to index codebase, or '@' to browse and reference files\n")
 
 	// Initialize MCP servers quietly (without showing connection details)
 	spinner, _ := pterm.DefaultSpinner.Start("Initializing...")
