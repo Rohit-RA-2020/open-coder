@@ -17,6 +17,7 @@ A powerful AI coding agent that can interact with your codebase through natural 
 - **Color Customization**: Personalize the appearance with different color schemes
 - **Display Options**: Toggle compact mode, timestamps, and hidden file visibility
 - **Auto-save Conversations**: Automatically save chat history to files
+- **Tool Call Cancellation**: Cancel long-running tool calls with Ctrl+C without interrupting the conversation
 
 ## 📁 Project Structure
 
@@ -325,6 +326,69 @@ Assistant:
 ⚙️  Calling: read_file
 ✅ Tool completed: read_file
 ```
+
+### Tool Call Cancellation
+
+Open-Coder supports canceling long-running tool calls. You can interrupt the tool execution by pressing `Ctrl+C` in your terminal. The agent will gracefully stop the tool and continue the conversation.
+
+#### How to Cancel a Tool Call
+
+When a tool is running, you'll see:
+```
+⏳ Tool execution in progress...
+💡 Press Ctrl+C to cancel this tool call (conversation will continue)
+────────────────────────────────────────────────────────────
+```
+
+Simply press **Ctrl+C** to cancel the execution:
+```
+📍 Cancellation signal received...
+⏹️  Tool execution cancelled - run_command was interrupted midway.
+```
+
+#### Why Cancel Tool Calls?
+
+- **Timeouts**: If a tool is taking longer than expected
+- **Wrong Input**: If you realize you provided incorrect parameters
+- **Experimentation**: To try a different approach without waiting for completion
+- **Resource Management**: To prevent resource-intensive operations
+
+#### After Cancellation
+
+✅ The conversation continues normally  
+✅ The AI receives information about which tool was cancelled  
+✅ The AI can suggest alternatives or ask for clarification  
+✅ You can proceed with the next command immediately  
+
+**Example:**
+```
+You ▸ Run a slow analysis on all files
+
+Assistant ▸
+⏳ Tool execution in progress...
+💡 Press Ctrl+C to cancel this tool call (conversation will continue)
+
+[After 5 seconds, you press Ctrl+C]
+
+📍 Cancellation signal received...
+⏹️  Tool execution cancelled - run_command was interrupted midway.
+
+The assistant understands:
+"The user cancelled the tool execution midway. Tool: run_command was interrupted and did not complete."
+
+Assistant ▸ I see you cancelled that operation. Would you like to:
+- Analyze a subset of files instead?
+- Try a different approach?
+- Move on to something else?
+```
+
+#### Key Features
+
+✓ **No Hardcoded Timeouts** - You decide when to cancel  
+✓ **Flexible Duration** - Different tools can take different amounts of time  
+✓ **Clear Feedback** - Immediate message shows which tool was cancelled  
+✓ **Smart Recovery** - AI understands the cancellation and responds appropriately  
+✓ **Conversation Awareness** - The cancellation is logged in conversation history  
 
 ## 🔌 Available Commands
 

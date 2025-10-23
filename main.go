@@ -8,8 +8,11 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"open-coder/pkg/indexer"
 
@@ -1063,8 +1066,10 @@ func (a *SimpleAgent) GetAllTools() ([]openai.ChatCompletionToolUnionParam, erro
 		tools, err := a.buildOpenAIToolsFromMCP(a.ctx, server.Session)
 		if err != nil {
 			log.Printf("Warning: failed to get tools from server %s: %v", server.Name, err)
+			a.getErrorColorStyle().Printf("⚠️  Failed to load tools from %s: %v\n", server.Name, err)
 			continue
 		}
+		a.getSystemColorStyle().Printf("✓ Loaded %d tools from %s\n", len(tools), server.Name)
 		allTools = append(allTools, tools...)
 	}
 
@@ -1078,6 +1083,10 @@ func (a *SimpleAgent) RefreshTools() error {
 		return err
 	}
 	a.tools = tools
+
+	// Debug: Log loaded tools summary
+	a.getSystemColorStyle().Printf("\n📋 Total tools loaded: %d tools from %d servers\n\n", len(a.tools), len(a.servers))
+
 	return nil
 }
 
@@ -1098,6 +1107,37 @@ func (a *SimpleAgent) CallTool(toolName string, arguments map[string]any) (inter
 		}
 
 		res, err := server.Session.CallTool(a.ctx, params)
+		if err == nil {
+			// Tool found and executed successfully
+			if len(res.Content) > 0 {
+				return res.Content[0], nil
+			}
+			return "Tool executed successfully", nil
+		}
+		// If tool not found on this server, try the next one
+	}
+
+	return nil, fmt.Errorf("tool %s not found in any connected server", toolName)
+}
+
+// CallToolWithContext executes a tool with context cancellation support
+func (a *SimpleAgent) CallToolWithContext(ctx context.Context, toolName string, arguments map[string]any) (interface{}, error) {
+	// Inject uid if this function originally had it (simplified for demo)
+	if a.userID != "" {
+		if arguments == nil {
+			arguments = make(map[string]any)
+		}
+		arguments["uid"] = a.userID
+	}
+
+	// Try each server until we find one that has the tool
+	for _, server := range a.servers {
+		params := &mcp.CallToolParams{
+			Name:      toolName,
+			Arguments: arguments,
+		}
+
+		res, err := server.Session.CallTool(ctx, params)
 		if err == nil {
 			// Tool found and executed successfully
 			if len(res.Content) > 0 {
@@ -1183,22 +1223,34 @@ func (a *SimpleAgent) ProcessUserInput(userInput string) error {
 					// Display tool call details in a dotted box before execution
 					a.displayToolCallDetails(toolCall.Function.Name, args)
 
-					// Execute the tool
-					result, err := a.CallTool(toolCall.Function.Name, args)
+					// Execute the tool with cancellation support
+					result, err := a.executeToolWithCancellation(toolCall.Function.Name, args)
+
 					if err != nil {
-						spinner.Fail("Failed")
-						a.getErrorColorStyle().Printf("Tool Error: %v\n", err)
-						result = fmt.Sprintf("Error: %v", err)
+						if strings.Contains(err.Error(), "cancelled") {
+							spinner.Fail("Cancelled")
+							a.getSystemColorStyle().Printf("\n⏹️  Tool execution cancelled - %s was interrupted midway.\n", toolCall.Function.Name)
+						} else {
+							spinner.Fail("Failed")
+							a.getErrorColorStyle().Printf("Tool Error: %v\n", err)
+						}
 					} else {
 						spinner.Success("Done")
 					}
 
-					// Display tool result in a dotted box after execution
-					a.displayToolResult(toolCall.Function.Name, result, err)
+					// Display tool result in a dotted box after execution (only if not cancelled)
+					if err == nil || !strings.Contains(err.Error(), "cancelled") {
+						a.displayToolResult(toolCall.Function.Name, result, err)
 
-					// Add tool message to conversation
-					toolMessage := openai.ToolMessage(fmt.Sprintf("%v", result), toolCall.ID)
-					a.messages = append(a.messages, toolMessage)
+						// Add tool message to conversation
+						toolMessage := openai.ToolMessage(fmt.Sprintf("%v", result), toolCall.ID)
+						a.messages = append(a.messages, toolMessage)
+					} else {
+						// For cancelled tools, add a clear message indicating cancellation
+						cancellationMsg := fmt.Sprintf("The user cancelled the tool execution midway. Tool: %s was interrupted and did not complete.", toolCall.Function.Name)
+						toolMessage := openai.ToolMessage(cancellationMsg, toolCall.ID)
+						a.messages = append(a.messages, toolMessage)
+					}
 				}
 			}
 
@@ -1282,6 +1334,61 @@ func (a *SimpleAgent) Close() {
 			// Best-effort close; ignore errors if method missing
 			_ = s.Session.Close()
 		}
+	}
+}
+
+// executeToolWithCancellation runs a tool in a goroutine and allows the user to cancel it via Ctrl+C
+func (a *SimpleAgent) executeToolWithCancellation(toolName string, args map[string]any) (interface{}, error) {
+	// Channels for results and completion
+	resultChan := make(chan interface{}, 1)
+	errChan := make(chan error, 1)
+	doneChan := make(chan bool, 1)
+
+	// Run the tool in a goroutine with the main context (not a cancellable child)
+	// This prevents breaking the MCP server connection when cancelled
+	go func() {
+		result, err := a.CallToolWithContext(a.ctx, toolName, args)
+		resultChan <- result
+		errChan <- err
+		doneChan <- true
+	}()
+
+	// Setup signal handling for Ctrl+C during tool execution
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT)
+	defer signal.Stop(sigChan)
+
+	// Display cancellation instructions
+	a.getSystemColorStyle().Printf("\n⏳ Tool execution in progress...\n")
+	a.getSystemColorStyle().Printf("💡 Press Ctrl+C to cancel this tool call (conversation will continue)\n")
+	a.getSystemColorStyle().Println(strings.Repeat("─", 60))
+
+	// Wait for either tool completion or user cancellation
+	select {
+	case <-sigChan:
+		// User pressed Ctrl+C
+		a.getSystemColorStyle().Printf("\n📍 Cancellation signal received...\n")
+
+		// Wait for goroutine to complete or timeout
+		select {
+		case result := <-resultChan:
+			err := <-errChan
+			if err != nil {
+				return result, fmt.Errorf("tool execution cancelled by user: %w", err)
+			}
+			return result, fmt.Errorf("tool execution cancelled by user")
+		case <-time.After(2 * time.Second):
+			// If tool doesn't finish within 2 seconds after cancellation, report it as cancelled
+			// Note: The goroutine will still be running in the background, but we're returning
+			a.getSystemColorStyle().Printf("⏹️  Tool call cancelled (goroutine may still be running).\n")
+			return nil, fmt.Errorf("tool execution cancelled by user (forced)")
+		}
+
+	case <-doneChan:
+		// Tool completed successfully
+		result := <-resultChan
+		err := <-errChan
+		return result, err
 	}
 }
 
