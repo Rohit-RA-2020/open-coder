@@ -1,17 +1,38 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
+
+// CommandExecution tracks an ongoing command execution
+type CommandExecution struct {
+	cmd     *exec.Cmd
+	cancel  context.CancelFunc
+	done    chan struct{}
+	timeout time.Duration
+}
+
+var (
+	executionsMutex sync.Mutex
+	executions      map[string]*CommandExecution
+)
+
+func init() {
+	executions = make(map[string]*CommandExecution)
+}
 
 func main() {
 	// Create a new MCP server
@@ -121,7 +142,7 @@ func runCommandHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.C
 		}
 	}
 
-	return executeCommand(command, args, nil, "", captureOutput, timeout)
+	return executeCommand(ctx, command, args, nil, "", captureOutput, timeout)
 }
 
 func runCommandWithEnvHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -164,7 +185,7 @@ func runCommandWithEnvHandler(ctx context.Context, request mcp.CallToolRequest) 
 		}
 	}
 
-	return executeCommand(command, args, envVars, "", captureOutput, timeout)
+	return executeCommand(ctx, command, args, envVars, "", captureOutput, timeout)
 }
 
 func runCommandInDirHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -197,10 +218,10 @@ func runCommandInDirHandler(ctx context.Context, request mcp.CallToolRequest) (*
 		}
 	}
 
-	return executeCommand(command, args, nil, directory, captureOutput, timeout)
+	return executeCommand(ctx, command, args, nil, directory, captureOutput, timeout)
 }
 
-func executeCommand(command string, args []interface{}, envVars []string, directory string, captureOutput bool, timeoutSeconds int) (*mcp.CallToolResult, error) {
+func executeCommand(parentCtx context.Context, command string, args []interface{}, envVars []string, directory string, captureOutput bool, timeoutSeconds int) (*mcp.CallToolResult, error) {
 	// Handle case where command might contain arguments (e.g., "mkdir folder")
 	var actualCommand string
 	var stringArgs []string
@@ -222,12 +243,23 @@ func executeCommand(command string, args []interface{}, envVars []string, direct
 		}
 	}
 
+	// Create a context for this command execution with timeout
+	var ctx context.Context
+	var cancel context.CancelFunc
+
+	if timeoutSeconds > 0 {
+		ctx, cancel = context.WithTimeout(parentCtx, time.Duration(timeoutSeconds)*time.Second)
+	} else {
+		ctx, cancel = context.WithCancel(parentCtx)
+	}
+	defer cancel()
+
 	// Create the command
 	var cmd *exec.Cmd
 	if len(stringArgs) > 0 {
-		cmd = exec.Command(actualCommand, stringArgs...)
+		cmd = exec.CommandContext(ctx, actualCommand, stringArgs...)
 	} else {
-		cmd = exec.Command(actualCommand)
+		cmd = exec.CommandContext(ctx, actualCommand)
 	}
 
 	// Set environment variables if provided
@@ -240,22 +272,7 @@ func executeCommand(command string, args []interface{}, envVars []string, direct
 		cmd.Dir = directory
 	}
 
-	// Set up timeout
-	var cancel context.CancelFunc
-	if timeoutSeconds > 0 {
-		var timeoutCtx context.Context
-		timeoutCtx, cancel = context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
-		defer cancel()
-		cmd = exec.CommandContext(timeoutCtx, actualCommand, stringArgs...)
-		if len(envVars) > 0 {
-			cmd.Env = append(os.Environ(), envVars...)
-		}
-		if directory != "" {
-			cmd.Dir = directory
-		}
-	}
-
-	// Prepare output capture
+	// Create output pipes to capture in real-time if needed
 	var stdout, stderr strings.Builder
 	if captureOutput {
 		cmd.Stdout = &stdout
@@ -289,6 +306,23 @@ func executeCommand(command string, args []interface{}, envVars []string, direct
 	}
 
 	result.WriteString("----------------------------------------\n")
+
+	// Handle context cancellation (Ctrl+C)
+	if ctx.Err() == context.Canceled {
+		result.WriteString("⚠️  Command execution was interrupted by user (Ctrl+C).\n")
+		result.WriteString("The process has been terminated gracefully.\n")
+		return mcp.NewToolResultText(result.String()), nil
+	}
+
+	// Handle timeout
+	if ctx.Err() == context.DeadlineExceeded {
+		result.WriteString(fmt.Sprintf("⏰ Command timed out after %d seconds\n", timeoutSeconds))
+		// Try to kill the process if still running
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		return mcp.NewToolResultText(result.String()), nil
+	}
 
 	// Exit code
 	exitCode := 0
