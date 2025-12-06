@@ -32,7 +32,8 @@ open-coder/
 │   └── indexer/          # Codebase indexing package
 │       ├── config.go      # Configuration management
 │       ├── scanner.go     # File discovery
-│       ├── chunker.go     # File chunking logic
+│       ├── chunker.go     # File chunking router
+│       ├── ast_chunker.go # AST-based semantic chunking (tree-sitter)
 │       ├── indexer.go     # Main indexing orchestration
 │       ├── config.example.go  # Example configurations
 │       └── README.md      # Indexer documentation
@@ -223,11 +224,12 @@ Assistant ▸
 
 - **`/index`** - Index the current codebase for semantic search:
   - 📂 Recursively discovers all code files in the current directory
-  - 📝 Breaks files into chunks of 100 lines with 10 line overlap
+  - 🌳 **AST-based semantic chunking** for Go, JS/TS, Python (extracts functions, classes, methods)
+  - 📝 Falls back to line-based chunking for other languages
   - 🤖 Generates AI summaries with code descriptions and pseudo code
   - 🔢 Creates vector embeddings from summaries
-  - 💾 Stores in Qdrant vector database for semantic search
-  - 🔍 Enables powerful code search capabilities
+  - 💾 Stores in Qdrant vector database with rich metadata (symbol, kind, parent)
+  - 🔍 Enables powerful semantic code search
 
 - **`@`** - Open the interactive file browser to select and reference files in your messages
 
@@ -286,10 +288,13 @@ Indexing files ████████████████████ 100%
 
 **How it works:**
 1. **File Discovery**: Scans all code files (.go, .py, .js, .ts, etc.) in the current directory
-2. **Chunking**: Breaks each file into overlapping chunks (0-100, 90-190, 180-280, etc.)
+2. **Smart Chunking**: 
+   - **AST-based** (Go, JS/TS, Python): Extracts functions, classes, methods as semantic units
+   - **Line-based** (other languages): Falls back to overlapping chunks (0-100, 90-190, etc.)
+   - Large functions (>200 lines) are split into sub-chunks with overlap
 3. **Summarization**: Uses AI to create concise summaries with pseudo code for each chunk
 4. **Embedding**: Generates vector embeddings from summaries using OpenAI's text-embedding-3-small
-5. **Storage**: Stores vectors in Qdrant with metadata (filename, line range, summary)
+5. **Storage**: Stores vectors in Qdrant with rich metadata (filename, lines, summary, symbol, kind, parent, language)
 
 **Collection Naming**: Collections are named based on the absolute path of the directory (e.g., `codebase_home_user_project`)
 
@@ -298,10 +303,13 @@ Indexing files ████████████████████ 100%
 - The indexing feature uses pre-configured Azure OpenAI endpoints
 
 **Customization**: The indexing logic is modular and located in `pkg/indexer/`. You can easily:
-- Modify file extensions to index (`config.go`)
-- Add/remove ignored directories and patterns (`config.go`)
-- Adjust chunk size and overlap (`config.go`)
-- See `pkg/indexer/README.md` for detailed customization options for summary generation and embeddings
+- Switch between AST and line-based chunking (`ChunkMode`: "ast" or "lines")
+- Configure AST-supported languages (`ASTLanguages`)
+- Adjust large function split threshold (`MaxChunkLines`, default: 200)
+- Modify file extensions to index (`CodeExtensions`)
+- Add/remove ignored directories and patterns
+- Adjust chunk size and overlap for line-based/sub-chunk splitting
+- See `pkg/indexer/README.md` for detailed customization options
 
 ### Advanced Usage with File Browser
 

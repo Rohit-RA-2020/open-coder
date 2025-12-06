@@ -127,8 +127,8 @@ func (idx *Indexer) processFiles(ctx context.Context, files []string, collection
 	for _, filePath := range files {
 		relPath, _ := filepath.Rel(basePath, filePath)
 
-		// Chunk the file
-		chunks, err := ChunkFile(filePath, idx.config.ChunkSize, idx.config.ChunkOverlap)
+		// Chunk the file (uses AST-based or line-based chunking based on config)
+		chunks, err := ChunkFile(filePath, idx.config)
 		if err != nil {
 			pterm.FgLightRed.Printf("⚠️  Failed to chunk %s: %v\n", relPath, err)
 			progressBar.Increment()
@@ -170,6 +170,31 @@ func (idx *Indexer) processChunk(ctx context.Context, chunk FileChunk, relPath, 
 		return fmt.Errorf("failed to generate embedding: %w", err)
 	}
 
+	// Build payload with base fields
+	payload := map[string]any{
+		"filename":   relPath,
+		"start_line": chunk.StartLine,
+		"end_line":   chunk.EndLine,
+		"summary":    summary,
+	}
+
+	// Add AST metadata if available
+	if chunk.Symbol != "" {
+		payload["symbol"] = chunk.Symbol
+	}
+	if chunk.Kind != "" {
+		payload["kind"] = chunk.Kind
+	}
+	if chunk.Parent != "" {
+		payload["parent"] = chunk.Parent
+	}
+	if chunk.Language != "" {
+		payload["language"] = chunk.Language
+	}
+	if chunk.Part != "" {
+		payload["part"] = chunk.Part
+	}
+
 	// Upsert to Qdrant
 	_, err = idx.qdrantClient.Upsert(ctx, &qdrant.UpsertPoints{
 		CollectionName: collectionName,
@@ -177,12 +202,7 @@ func (idx *Indexer) processChunk(ctx context.Context, chunk FileChunk, relPath, 
 			{
 				Id:      qdrant.NewIDUUID(uuid.NewString()),
 				Vectors: qdrant.NewVectors(embedding...),
-				Payload: qdrant.NewValueMap(map[string]any{
-					"filename":   relPath,
-					"start_line": chunk.StartLine,
-					"end_line":   chunk.EndLine,
-					"summary":    summary,
-				}),
+				Payload: qdrant.NewValueMap(payload),
 			},
 		},
 	})

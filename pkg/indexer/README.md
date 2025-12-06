@@ -8,10 +8,12 @@ This package provides functionality to:
 - Scan and discover code files in a directory
 - Automatically exclude binary files, images, and large files (>1MB)
 - Respect .gitignore patterns for intelligent filtering
-- Break files into overlapping chunks for better context
+- **AST-based semantic chunking** for Go, JavaScript/TypeScript, and Python (extracts functions, classes, methods)
+- Fallback to line-based overlapping chunks for unsupported languages
+- Split large functions/classes into sub-chunks with overlap
 - Generate AI-powered summaries of code chunks
 - Create vector embeddings for semantic search
-- Store everything in Qdrant vector database
+- Store everything in Qdrant vector database with rich metadata
 
 ## Structure
 
@@ -19,7 +21,8 @@ This package provides functionality to:
 pkg/indexer/
 ├── config.go       # Configuration management
 ├── scanner.go      # File discovery and filtering
-├── chunker.go      # File chunking logic
+├── chunker.go      # File chunking router and line-based chunking
+├── ast_chunker.go  # AST-based semantic chunking using tree-sitter
 ├── indexer.go      # Main indexing orchestration
 └── README.md       # This file
 ```
@@ -76,9 +79,12 @@ The JSON config file should have this structure:
     },
     "chunking": {
       "size": "100",
-      "overlap": "10"
+      "overlap": "10",
+      "mode": "ast",
+      "max_node_lines": "200"
     },
-    "vector_dimensions": "1536"
+    "vector_dimensions": "1536",
+    "ast_languages": [".go", ".js", ".jsx", ".ts", ".tsx", ".py"]
   }
 }
 ```
@@ -91,6 +97,11 @@ config := indexer.LoadConfigFromEnv()
 // Modify chunking settings
 config.ChunkSize = 150
 config.ChunkOverlap = 20
+
+// AST chunking options
+config.ChunkMode = "ast"           // or "lines" for line-based only
+config.MaxChunkLines = 200         // Split functions larger than this
+config.ASTLanguages = []string{".go", ".js", ".ts", ".py"}  // Languages for AST chunking
 
 // Add custom file extensions
 config.AddCodeExtension(".sol")  // Solidity
@@ -110,8 +121,11 @@ idx, err := indexer.NewIndexer(config)
 ## Configuration Options
 
 ### Chunking Settings
-- **ChunkSize**: Number of lines per chunk (env: `CHUNK_SIZE`, default: 100)
+- **ChunkMode**: Chunking strategy - `"ast"` or `"lines"` (env: `CHUNK_MODE`, default: `"ast"`)
+- **ChunkSize**: Number of lines per chunk for line-based mode and sub-chunk splitting (env: `CHUNK_SIZE`, default: 100)
 - **ChunkOverlap**: Overlapping lines between chunks (env: `CHUNK_OVERLAP`, default: 10)
+- **MaxChunkLines**: Max lines before splitting a large function/class into sub-chunks (env: `MAX_CHUNK_LINES`, default: 200)
+- **ASTLanguages**: File extensions for AST-based chunking (default: `[".go", ".js", ".jsx", ".ts", ".tsx", ".py"]`)
 
 ### File Filtering
 - **CodeExtensions**: File extensions to index (default: common programming languages)
@@ -193,6 +207,10 @@ config := indexer.DefaultConfig()
 // Only index specific files
 config.CodeExtensions = []string{".ts", ".tsx", ".js", ".jsx"}
 
+// Use AST chunking (default) - extracts functions, classes, methods
+config.ChunkMode = "ast"
+config.MaxChunkLines = 150  // Split large components
+
 // Ignore test files
 config.AddIgnorePattern("*.test.ts")
 config.AddIgnorePattern("*.test.tsx")
@@ -202,12 +220,25 @@ config.AddIgnorePattern("*.spec.ts")
 config.AddIgnoreDir("dist")
 config.AddIgnoreDir("coverage")
 
-// Smaller chunks for detailed indexing
+// Smaller sub-chunks for split large functions
 config.ChunkSize = 50
 config.ChunkOverlap = 5
 
 idx, _ := indexer.NewIndexer(config)
 idx.IndexDirectory(ctx, "./my-react-app")
+```
+
+## Example: Force Line-Based Chunking
+
+```go
+// Disable AST chunking for legacy codebase
+config := indexer.DefaultConfig()
+config.ChunkMode = "lines"  // Force line-based chunking
+config.ChunkSize = 100
+config.ChunkOverlap = 10
+
+idx, _ := indexer.NewIndexer(config)
+idx.IndexDirectory(ctx, "./legacy-project")
 ```
 
 ## How It Works
@@ -220,10 +251,35 @@ idx.IndexDirectory(ctx, "./my-react-app")
 - Respects .gitignore patterns
 - Skips files larger than 1MB
 
-### 2. File Chunking (chunker.go)
-- Reads file content
-- Splits into lines
-- Creates overlapping chunks
+### 2. File Chunking (chunker.go + ast_chunker.go)
+
+The indexer uses a smart chunking router that selects the best strategy:
+
+#### AST-Based Chunking (Default for Go, JS/TS, Python)
+Uses [tree-sitter](https://tree-sitter.github.io/) to parse code and extract semantic units:
+
+- **Functions**: `function_declaration`, `method_declaration`, `arrow_function`
+- **Classes**: `class_declaration`, `class_definition`
+- **Methods**: `method_definition` (including nested methods inside classes)
+- **Types**: `type_declaration`, `interface_declaration`, `type_alias_declaration`
+- **Constants/Variables**: `const_declaration`, `var_declaration`, `variable_declaration`
+
+**Benefits:**
+- Chunks respect code structure (never splits mid-function)
+- Captures symbol names, kinds, and parent relationships
+- Attaches leading comments/docstrings to their declarations
+- Large functions (>200 lines) are split into sub-chunks with overlap
+
+**Chunk Metadata:**
+- `Symbol`: Function/class name (e.g., "handleRequest", "UserService")
+- `Kind`: Declaration type ("function", "class", "method", "interface", etc.)
+- `Parent`: Parent class/receiver for methods
+- `Language`: Source language ("go", "javascript", "typescript", "python")
+- `Part`: Sub-chunk indicator (e.g., "1/3") for split large nodes
+
+#### Line-Based Chunking (Fallback)
+For unsupported languages or when AST parsing fails:
+- Splits into fixed-size overlapping chunks
 - Example: Lines 0-100, 90-190, 180-280...
 
 ### 3. Summary Generation (indexer.go)
@@ -239,7 +295,7 @@ idx.IndexDirectory(ctx, "./my-react-app")
 ### 5. Vector Storage (indexer.go)
 - Stores in Qdrant collection
 - Collection named after directory path
-- Includes metadata: filename, line range, summary
+- Includes metadata: filename, line range, summary, symbol, kind, parent, language, part
 
 ## Collection Naming
 
@@ -255,21 +311,118 @@ The indexer is resilient to errors:
 - Progress bar shows overall completion
 - Final summary shows success metrics
 
-## Performance Tips
 
-1. **Adjust Chunk Size**: Larger chunks = fewer API calls but less granular search
-2. **Use Patterns**: Filter out unnecessary files early
-3. **Batch Processing**: The indexer processes files sequentially with progress tracking
-4. **Parallel Potential**: Could be extended for parallel processing
+## AST-Supported Languages
 
-## Future Enhancements
+The following languages use semantic AST-based chunking:
 
-- [ ] Parallel file processing
-- [ ] Incremental indexing (only changed files)
-- [ ] Custom summarization prompts
-- [ ] Multiple embedding models
-- [ ] Configuration file support (.indexer.yaml)
-- [ ] Configurable file size limits
-- [ ] Language-specific chunking strategies
-- [ ] Advanced binary file detection (MIME type checking)
+| Language | Extensions | Extracted Symbols |
+|----------|------------|-------------------|
+| Go | `.go` | functions, methods, types, const, var |
+| JavaScript | `.js`, `.jsx` | functions, classes, methods, variables, exports |
+| TypeScript | `.ts`, `.tsx` | functions, classes, methods, interfaces, types, enums, variables |
+| Python | `.py` | functions, classes, methods (including decorated) |
 
+All other languages fall back to line-based chunking.
+
+## Adding Support for New Languages
+
+To add AST-based chunking for a new language (e.g., Rust, Ruby, Java):
+
+### Step 1: Add the tree-sitter grammar dependency
+
+```bash
+go get github.com/smacker/go-tree-sitter/rust
+```
+
+Available grammars: [github.com/smacker/go-tree-sitter](https://github.com/smacker/go-tree-sitter) (rust, ruby, java, c, cpp, c_sharp, php, etc.)
+
+### Step 2: Update `ast_chunker.go`
+
+**1. Add the import:**
+
+```go
+import (
+    // ... existing imports
+    "github.com/smacker/go-tree-sitter/rust"
+)
+```
+
+**2. Register the language in `langMap`:**
+
+```go
+var langMap = map[string]*sitter.Language{
+    // ... existing languages
+    ".rs": rust.GetLanguage(),
+}
+```
+
+**3. Add language name mapping in `langNameMap`:**
+
+```go
+var langNameMap = map[string]string{
+    // ... existing mappings
+    ".rs": "rust",
+}
+```
+
+**4. Define declaration types in `declarationTypes`:**
+
+```go
+var declarationTypes = map[string]map[string]string{
+    // ... existing languages
+    "rust": {
+        "function_item":     "function",
+        "impl_item":         "impl",
+        "struct_item":       "struct",
+        "enum_item":         "enum",
+        "trait_item":        "trait",
+        "const_item":        "const",
+        "static_item":       "variable",
+        "mod_item":          "module",
+    },
+}
+```
+
+### Step 3: Update config defaults
+
+In `config.go`, add the extension to `ASTLanguages`:
+
+```go
+ASTLanguages: []string{".go", ".js", ".jsx", ".ts", ".tsx", ".py", ".rs"},
+```
+
+### Finding Node Types
+
+To discover the correct node types for a language:
+
+1. **Use tree-sitter playground**: [tree-sitter.github.io/tree-sitter/playground](https://tree-sitter.github.io/tree-sitter/playground)
+2. **Check grammar source**: Look at the grammar's `grammar.js` in the tree-sitter repo
+3. **Print AST**: Add debug logging in `extractDeclarations` to see node types:
+   ```go
+   fmt.Printf("Node: %s at line %d\n", node.Type(), node.StartPoint().Row)
+   ```
+
+### Example: Adding Ruby Support
+
+```go
+// 1. Import
+import "github.com/smacker/go-tree-sitter/ruby"
+
+// 2. langMap
+".rb": ruby.GetLanguage(),
+
+// 3. langNameMap  
+".rb": "ruby",
+
+// 4. declarationTypes
+"ruby": {
+    "method":           "method",
+    "singleton_method": "method",
+    "class":            "class",
+    "module":           "module",
+    "assignment":       "variable",
+},
+```
+
+Then run `go mod tidy` and rebuild.

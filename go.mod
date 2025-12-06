@@ -9,6 +9,7 @@ require (
 	github.com/openai/openai-go/v3 v3.6.1
 	github.com/pterm/pterm v0.12.82
 	github.com/qdrant/go-client v1.15.2
+	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 )
 
 require (

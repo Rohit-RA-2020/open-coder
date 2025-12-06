@@ -27,18 +27,24 @@ type OpenCoderConfig struct {
 			Port string `json:"port"`
 		} `json:"qdrant"`
 		Chunking struct {
-			Size    string `json:"size"`
-			Overlap string `json:"overlap"`
+			Size         string `json:"size"`
+			Overlap      string `json:"overlap"`
+			Mode         string `json:"mode"`
+			MaxNodeLines string `json:"max_node_lines"`
 		} `json:"chunking"`
-		VectorDimensions string `json:"vector_dimensions"`
+		VectorDimensions string   `json:"vector_dimensions"`
+		ASTLanguages     []string `json:"ast_languages"`
 	} `json:"indexer"`
 }
 
 // Config holds the configuration for the indexer
 type Config struct {
 	// Chunking settings
-	ChunkSize    int // Number of lines per chunk
-	ChunkOverlap int // Number of overlapping lines between chunks
+	ChunkSize     int    // Number of lines per chunk (for line-based and sub-chunk splitting)
+	ChunkOverlap  int    // Number of overlapping lines between chunks
+	ChunkMode     string // "ast" or "lines" (default: "ast")
+	MaxChunkLines int    // Max lines before splitting a node (default: 200)
+	ASTLanguages  []string // Languages with AST support (e.g., [".go", ".js", ".ts", ".py"])
 
 	// File filtering
 	CodeExtensions []string // File extensions to index
@@ -66,8 +72,11 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		// Chunking settings
-		ChunkSize:    100,
-		ChunkOverlap: 10,
+		ChunkSize:     100,
+		ChunkOverlap:  10,
+		ChunkMode:     "ast",
+		MaxChunkLines: 200,
+		ASTLanguages:  []string{".go", ".js", ".jsx", ".ts", ".tsx", ".py"},
 
 		// Common code file extensions
 		CodeExtensions: []string{
@@ -217,6 +226,19 @@ func LoadConfigFromEnv() *Config {
 				config.VectorDimensions = dims
 			}
 		}
+
+		// AST chunking config
+		if jsonConfig.Indexer.Chunking.Mode != "" {
+			config.ChunkMode = jsonConfig.Indexer.Chunking.Mode
+		}
+		if jsonConfig.Indexer.Chunking.MaxNodeLines != "" {
+			if maxLines, err := strconv.Atoi(jsonConfig.Indexer.Chunking.MaxNodeLines); err == nil {
+				config.MaxChunkLines = maxLines
+			}
+		}
+		if len(jsonConfig.Indexer.ASTLanguages) > 0 {
+			config.ASTLanguages = jsonConfig.Indexer.ASTLanguages
+		}
 	}
 
 	// Load .env file if it exists (for backward compatibility)
@@ -262,6 +284,14 @@ func LoadConfigFromEnv() *Config {
 	if val := os.Getenv("CHUNK_OVERLAP"); val != "" {
 		if overlap, err := strconv.Atoi(val); err == nil {
 			config.ChunkOverlap = overlap
+		}
+	}
+	if val := os.Getenv("CHUNK_MODE"); val != "" {
+		config.ChunkMode = val
+	}
+	if val := os.Getenv("MAX_CHUNK_LINES"); val != "" {
+		if maxLines, err := strconv.Atoi(val); err == nil {
+			config.MaxChunkLines = maxLines
 		}
 	}
 
