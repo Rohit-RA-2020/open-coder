@@ -197,6 +197,8 @@ type SimpleAgent struct {
 	compactMode    bool   // Compact display mode
 	currentDir     string // Current working directory for file browser
 	showHidden     bool   // Show hidden files in file browser
+	// Security
+	requireTerminalApproval bool // Require approval before executing terminal commands
 }
 
 type MCPServerConfig struct {
@@ -233,6 +235,7 @@ func NewSimpleAgent(ctx context.Context, model string, apiKey string, baseURL st
 		compactMode:    false,          // Normal display mode by default
 		currentDir:     "",             // Will be set to current working directory
 		showHidden:     false,          // Don't show hidden files by default
+		requireTerminalApproval: true,  // Require approval for terminal commands by default
 	}
 }
 
@@ -685,9 +688,10 @@ func (a *SimpleAgent) showChatSettings() error {
 	for {
 		pterm.FgLightWhite.Println("\nCurrent settings:")
 		pterm.FgLightWhite.Printf("1. Auto-save Chat: %t\n", a.autoSaveChat)
+		pterm.FgLightWhite.Printf("2. Require approval before terminal commands: %t\n", a.requireTerminalApproval)
 		pterm.FgLightWhite.Println("\n0. Back to Settings")
 
-		pterm.FgLightWhite.Print("Enter choice (0-1): ")
+		pterm.FgLightWhite.Print("Enter choice (0-2): ")
 
 		reader := bufio.NewReader(os.Stdin)
 		input, err := reader.ReadString('\n')
@@ -702,17 +706,27 @@ func (a *SimpleAgent) showChatSettings() error {
 
 		var choice int
 		_, err = fmt.Sscanf(input, "%d", &choice)
-		if err != nil || choice != 1 {
+		if err != nil || choice < 1 || choice > 2 {
 			pterm.FgRed.Println("Invalid choice. Please try again.")
 			continue
 		}
 
-		a.autoSaveChat = !a.autoSaveChat
-		status := "disabled"
-		if a.autoSaveChat {
-			status = "enabled"
+		switch choice {
+		case 1:
+			a.autoSaveChat = !a.autoSaveChat
+			status := "disabled"
+			if a.autoSaveChat {
+				status = "enabled"
+			}
+			pterm.FgLightGreen.Printf("✅ Auto-save chat %s\n", status)
+		case 2:
+			a.requireTerminalApproval = !a.requireTerminalApproval
+			status := "disabled"
+			if a.requireTerminalApproval {
+				status = "enabled"
+			}
+			pterm.FgLightGreen.Printf("✅ Terminal command approval %s\n", status)
 		}
-		pterm.FgLightGreen.Printf("✅ Auto-save chat %s\n", status)
 
 		pterm.FgLightWhite.Println("Press Enter to continue...")
 		reader.ReadString('\n')
@@ -1208,20 +1222,40 @@ func (a *SimpleAgent) ProcessUserInput(userInput string) error {
 			// Execute tools and add tool messages
 			for _, toolCall := range acc.Choices[0].Message.ToolCalls {
 				if toolCall.Function.Name != "" && toolCall.ID != "" {
-					spinner, _ := pterm.DefaultSpinner.
-						WithRemoveWhenDone(true).
-						WithShowTimer(false).
-						Start(a.getToolColorStyle().Sprint(fmt.Sprintf("Running %s", toolCall.Function.Name)))
-
 					// Parse arguments
 					var args map[string]any
 					if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
-						spinner.Fail("Failed")
+						if spinner, _ := pterm.DefaultSpinner.
+							WithRemoveWhenDone(true).
+							WithShowTimer(false).
+							Start(a.getToolColorStyle().Sprint(fmt.Sprintf("Running %s", toolCall.Function.Name))); spinner != nil {
+							spinner.Fail("Failed")
+						}
 						continue
 					}
 
 					// Display tool call details in a dotted box before execution
 					a.displayToolCallDetails(toolCall.Function.Name, args)
+
+					// Terminal command approval gate
+					if a.requireTerminalApproval && a.isTerminalCommandTool(toolCall.Function.Name) {
+						approved, err := a.promptTerminalApproval(toolCall.Function.Name, args)
+						if err != nil {
+							a.getErrorColorStyle().Printf("Approval prompt failed: %v\n", err)
+						}
+						if !approved {
+							declineMsg := fmt.Sprintf("Terminal command %s was not executed (user declined approval).", toolCall.Function.Name)
+							a.displayToolResult(toolCall.Function.Name, declineMsg, fmt.Errorf("user declined approval"))
+							toolMessage := openai.ToolMessage(declineMsg, toolCall.ID)
+							a.messages = append(a.messages, toolMessage)
+							continue
+						}
+					}
+
+					spinner, _ := pterm.DefaultSpinner.
+						WithRemoveWhenDone(true).
+						WithShowTimer(false).
+						Start(a.getToolColorStyle().Sprint(fmt.Sprintf("Running %s", toolCall.Function.Name)))
 
 					// Execute the tool with cancellation support
 					result, err := a.executeToolWithCancellation(toolCall.Function.Name, args)
@@ -1417,6 +1451,44 @@ func (a *SimpleAgent) displayToolCallDetails(toolName string, args map[string]an
 	}
 
 	a.getToolColorStyle().Println(strings.Repeat("└", 60))
+}
+
+// isTerminalCommandTool returns true if the tool is a terminal command executor
+func (a *SimpleAgent) isTerminalCommandTool(toolName string) bool {
+	switch toolName {
+	case "run_command", "run_command_with_env", "run_command_in_dir":
+		return true
+	default:
+		return false
+	}
+}
+
+// promptTerminalApproval asks the user to approve executing a terminal command
+func (a *SimpleAgent) promptTerminalApproval(toolName string, args map[string]any) (bool, error) {
+	a.getSystemColorStyle().Println("\n⚠️  Terminal command requires approval.")
+
+	// Show a concise preview
+	if cmd, ok := args["command"].(string); ok && cmd != "" {
+		a.getSystemColorStyle().Printf("Command: %s\n", cmd)
+	}
+	if argStr, ok := args["args"].(string); ok && argStr != "" {
+		a.getSystemColorStyle().Printf("Args: %s\n", argStr)
+	}
+	if dir, ok := args["directory"].(string); ok && dir != "" {
+		a.getSystemColorStyle().Printf("Directory: %s\n", dir)
+	}
+	if envStr, ok := args["env"].(string); ok && envStr != "" {
+		a.getSystemColorStyle().Printf("Env: %s\n", envStr)
+	}
+
+	a.getSystemColorStyle().Print("Approve? (y/N): ")
+	reader := bufio.NewReader(os.Stdin)
+	input, err := reader.ReadString('\n')
+	if err != nil {
+		return false, err
+	}
+	input = strings.ToLower(strings.TrimSpace(input))
+	return input == "y" || input == "yes", nil
 }
 
 // displayToolResult displays the result of a tool call in a formatted box
