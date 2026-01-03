@@ -1,0 +1,495 @@
+package ui
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+
+	"open-coder/pkg/indexer"
+)
+
+// Agent wraps the backend logic and provides the AgentInterface
+type Agent struct {
+	ctx          context.Context
+	cancel       context.CancelFunc
+	openaiClient *openai.Client
+	model        string
+	apiKey       string
+	baseURL      string
+
+	// MCP
+	mcpClient *mcp.Client
+	servers   []*MCPServer
+	tools     []openai.ChatCompletionToolUnionParam
+
+	// Conversation
+	messages     []openai.ChatCompletionMessageParamUnion
+	systemPrompt string
+
+	// State
+	mu                      sync.Mutex
+	currentToolCancel       context.CancelFunc
+	requireTerminalApproval bool
+
+	// Program reference for sending messages
+	program *tea.Program
+}
+
+// MCPServer represents a connected MCP server
+type MCPServer struct {
+	Name    string
+	Command string
+	Args    []string
+	Session *mcp.ClientSession
+}
+
+// NewAgent creates a new Agent instance
+func NewAgent(ctx context.Context, model, apiKey, baseURL string) *Agent {
+	ctx, cancel := context.WithCancel(ctx)
+
+	client := openai.NewClient(
+		option.WithAPIKey(apiKey),
+		option.WithBaseURL(baseURL),
+	)
+
+	return &Agent{
+		ctx:                     ctx,
+		cancel:                  cancel,
+		openaiClient:            &client,
+		model:                   model,
+		apiKey:                  apiKey,
+		baseURL:                 baseURL,
+		mcpClient:               mcp.NewClient(&mcp.Implementation{Name: "open-coder", Version: "v2.0.0"}, nil),
+		servers:                 make([]*MCPServer, 0),
+		tools:                   make([]openai.ChatCompletionToolUnionParam, 0),
+		messages:                make([]openai.ChatCompletionMessageParamUnion, 0),
+		requireTerminalApproval: true,
+	}
+}
+
+// SetProgram sets the tea.Program reference for sending messages
+func (a *Agent) SetProgram(p *tea.Program) {
+	a.program = p
+}
+
+// InitConversation initializes the conversation with a system prompt
+func (a *Agent) InitConversation(systemPrompt string) {
+	a.systemPrompt = systemPrompt
+	a.messages = []openai.ChatCompletionMessageParamUnion{
+		openai.SystemMessage(systemPrompt),
+	}
+}
+
+// ClearConversation resets the conversation to start fresh
+func (a *Agent) ClearConversation() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.messages = []openai.ChatCompletionMessageParamUnion{
+		openai.SystemMessage(a.systemPrompt),
+	}
+}
+
+// AddMCPServer connects to an MCP server
+func (a *Agent) AddMCPServer(name, command string, args []string) error {
+	server := &MCPServer{
+		Name:    name,
+		Command: command,
+		Args:    args,
+	}
+
+	transport := &mcp.CommandTransport{Command: exec.Command(command, args...)}
+	session, err := a.mcpClient.Connect(a.ctx, transport, nil)
+	if err != nil {
+		return fmt.Errorf("failed to connect to server %s: %w", name, err)
+	}
+
+	server.Session = session
+	a.servers = append(a.servers, server)
+	return nil
+}
+
+// RefreshTools loads tools from all connected MCP servers
+func (a *Agent) RefreshTools() error {
+	var allTools []openai.ChatCompletionToolUnionParam
+
+	for _, server := range a.servers {
+		tools, err := a.buildOpenAIToolsFromMCP(server.Session)
+		if err != nil {
+			continue
+		}
+		allTools = append(allTools, tools...)
+	}
+
+	a.tools = allTools
+	return nil
+}
+
+// buildOpenAIToolsFromMCP converts MCP tools to OpenAI format
+func (a *Agent) buildOpenAIToolsFromMCP(session *mcp.ClientSession) ([]openai.ChatCompletionToolUnionParam, error) {
+	res, err := session.ListTools(a.ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]openai.ChatCompletionToolUnionParam, 0, len(res.Tools))
+	for _, t := range res.Tools {
+		var paramsObj map[string]any
+		if t.InputSchema != nil {
+			raw, err := json.Marshal(t.InputSchema)
+			if err != nil {
+				continue
+			}
+			if err := json.Unmarshal(raw, &paramsObj); err != nil {
+				continue
+			}
+		} else {
+			paramsObj = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+
+		// Normalize schema
+		if paramsObj == nil {
+			paramsObj = map[string]any{}
+		}
+		if v, ok := paramsObj["type"]; !ok || v != "object" {
+			paramsObj["type"] = "object"
+		}
+		if _, ok := paramsObj["properties"]; !ok {
+			paramsObj["properties"] = map[string]any{}
+		}
+
+		// Filter out 'uid' parameter
+		if props, ok := paramsObj["properties"].(map[string]any); ok {
+			delete(props, "uid")
+		}
+
+		tool := openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+			Name:        t.Name,
+			Description: openai.String(t.Description),
+			Parameters:  openai.FunctionParameters(paramsObj),
+		})
+		out = append(out, tool)
+	}
+	return out, nil
+}
+
+// GetModelName returns the model name
+func (a *Agent) GetModelName() string {
+	return a.model
+}
+
+// GetServerCount returns the number of connected servers
+func (a *Agent) GetServerCount() int {
+	return len(a.servers)
+}
+
+// GetToolCount returns the number of available tools
+func (a *Agent) GetToolCount() int {
+	return len(a.tools)
+}
+
+// IsTerminalApprovalRequired returns whether terminal approval is required
+func (a *Agent) IsTerminalApprovalRequired() bool {
+	return a.requireTerminalApproval
+}
+
+// ToggleTerminalApproval toggles terminal approval requirement
+func (a *Agent) ToggleTerminalApproval() {
+	a.requireTerminalApproval = !a.requireTerminalApproval
+}
+
+// CancelCurrentTool cancels the currently running tool
+func (a *Agent) CancelCurrentTool() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.currentToolCancel != nil {
+		a.currentToolCancel()
+		a.currentToolCancel = nil
+	}
+}
+
+// ProcessMessage implements AgentInterface - processes user input and returns a command
+func (a *Agent) ProcessMessage(content string) tea.Cmd {
+	return func() tea.Msg {
+		a.messages = append(a.messages, openai.UserMessage(content))
+		return a.processConversation()
+	}
+}
+
+// processConversation handles the conversation loop with streaming
+func (a *Agent) processConversation() tea.Msg {
+	for {
+		// Create streaming request
+		stream := a.openaiClient.Chat.Completions.NewStreaming(a.ctx, openai.ChatCompletionNewParams{
+			Messages:          a.messages,
+			Model:             openai.ChatModel(a.model),
+			Tools:             a.tools,
+			ParallelToolCalls: openai.Bool(false),
+		})
+
+		acc := openai.ChatCompletionAccumulator{}
+
+		// Stream the response
+		for stream.Next() {
+			current := stream.Current()
+			acc.AddChunk(current)
+
+			// Send content chunks to UI
+			if len(current.Choices) > 0 && current.Choices[0].Delta.Content != "" {
+				if a.program != nil {
+					a.program.Send(StreamChunkMsg{
+						Content: current.Choices[0].Delta.Content,
+						Done:    false,
+					})
+				}
+			}
+		}
+
+		if err := stream.Err(); err != nil {
+			return StreamErrorMsg{Err: err}
+		}
+
+		// Check for tool calls
+		if len(acc.Choices) > 0 && len(acc.Choices[0].Message.ToolCalls) > 0 {
+			a.messages = append(a.messages, acc.Choices[0].Message.ToParam())
+
+			// Execute tool calls
+			for _, tc := range acc.Choices[0].Message.ToolCalls {
+				if tc.Function.Name != "" && tc.ID != "" {
+					// Convert to our ToolCall type
+					toolCall := ToolCall{
+						ID:        tc.ID,
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					}
+					result, err := a.executeTool(toolCall)
+
+					var resultStr string
+					if err != nil {
+						resultStr = fmt.Sprintf("Error: %v", err)
+					} else {
+						resultStr = fmt.Sprintf("%v", result)
+					}
+
+					toolMessage := openai.ToolMessage(resultStr, tc.ID)
+					a.messages = append(a.messages, toolMessage)
+				}
+			}
+
+			// Continue the loop to get the next response
+			continue
+		}
+
+		// No more tool calls - add final message and finish
+		if len(acc.Choices) > 0 {
+			a.messages = append(a.messages, acc.Choices[0].Message.ToParam())
+		}
+
+		// Signal completion
+		return StreamChunkMsg{Done: true}
+	}
+}
+
+// ToolCall represents the data we need from a tool call
+type ToolCall struct {
+	ID        string
+	Name      string
+	Arguments string
+}
+
+// executeTool executes a single tool call
+func (a *Agent) executeTool(toolCall ToolCall) (interface{}, error) {
+	// Parse arguments
+	var args map[string]any
+	if err := json.Unmarshal([]byte(toolCall.Arguments), &args); err != nil {
+		return nil, err
+	}
+
+	// Send tool start message
+	if a.program != nil {
+		a.program.Send(ToolCallStartMsg{
+			ToolName: toolCall.Name,
+			ToolID:   toolCall.ID,
+			Args:     args,
+		})
+	}
+
+	// Check if terminal approval is needed
+	if a.requireTerminalApproval && a.isTerminalCommandTool(toolCall.Name) {
+		// For now, we'll auto-approve in this version
+		// A more complete implementation would use channels for approval
+	}
+
+	// Create cancellable context for this tool
+	toolCtx, toolCancel := context.WithCancel(a.ctx)
+	a.mu.Lock()
+	a.currentToolCancel = toolCancel
+	a.mu.Unlock()
+
+	defer func() {
+		a.mu.Lock()
+		a.currentToolCancel = nil
+		a.mu.Unlock()
+	}()
+
+	// Execute the tool
+	result, err := a.callTool(toolCtx, toolCall.Name, args)
+
+	// Send result message
+	if a.program != nil {
+		if toolCtx.Err() != nil {
+			a.program.Send(ToolCallCancelledMsg{
+				ToolName: toolCall.Name,
+				ToolID:   toolCall.ID,
+			})
+			return nil, fmt.Errorf("cancelled")
+		}
+
+		a.program.Send(ToolCallResultMsg{
+			ToolName: toolCall.Name,
+			ToolID:   toolCall.ID,
+			Result:   fmt.Sprintf("%v", result),
+			Error:    err,
+		})
+	}
+
+	return result, err
+}
+
+// callTool calls an MCP tool
+func (a *Agent) callTool(ctx context.Context, toolName string, args map[string]any) (interface{}, error) {
+	for _, server := range a.servers {
+		params := &mcp.CallToolParams{
+			Name:      toolName,
+			Arguments: args,
+		}
+
+		res, err := server.Session.CallTool(ctx, params)
+		if err == nil {
+			if len(res.Content) > 0 {
+				return res.Content[0], nil
+			}
+			return "Tool executed successfully", nil
+		}
+	}
+	return nil, fmt.Errorf("tool %s not found in any connected server", toolName)
+}
+
+// isTerminalCommandTool checks if a tool is a terminal command
+func (a *Agent) isTerminalCommandTool(toolName string) bool {
+	switch toolName {
+	case "run_command", "run_command_with_env", "run_command_in_dir":
+		return true
+	default:
+		return false
+	}
+}
+
+// IndexCodebase implements AgentInterface - starts codebase indexing
+func (a *Agent) IndexCodebase() tea.Cmd {
+	return func() tea.Msg {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return IndexingErrorMsg{Err: err}
+		}
+
+		// Check if already indexed
+		if marker, indexed := indexer.IsDirectoryIndexed(cwd); indexed {
+			return IndexingCompleteMsg{
+				FilesProcessed:  marker.FilesProcessed,
+				ChunksProcessed: marker.ChunksCreated,
+				AlreadyIndexed:  true,
+			}
+		}
+
+		if a.program != nil {
+			a.program.Send(IndexingStartMsg{Directory: cwd})
+		}
+
+		// Load indexer config
+		config := indexer.LoadConfigFromEnv()
+
+		// Create indexer
+		idx, err := indexer.NewIndexer(config)
+		if err != nil {
+			return IndexingErrorMsg{Err: fmt.Errorf("failed to create indexer: %w", err)}
+		}
+
+		// Progress callback
+		onProgress := func(current, total int, filename string) {
+			if a.program != nil {
+				a.program.Send(IndexingProgressMsg{
+					Current: current,
+					Total:   total,
+					File:    filename,
+				})
+			}
+		}
+
+		// Run indexing with progress
+		filesProcessed, chunksProcessed, err := idx.IndexDirectoryWithProgress(a.ctx, cwd, onProgress)
+		if err != nil {
+			return IndexingErrorMsg{Err: err}
+		}
+
+		return IndexingCompleteMsg{
+			FilesProcessed:  filesProcessed,
+			ChunksProcessed: chunksProcessed,
+		}
+	}
+}
+
+// Close cleans up resources
+func (a *Agent) Close() {
+	a.cancel()
+	for _, s := range a.servers {
+		if s.Session != nil {
+			_ = s.Session.Close()
+		}
+	}
+}
+
+// DiscoverAndConnectServers auto-discovers MCP servers in ~/.open-coder/
+func (a *Agent) DiscoverAndConnectServers() (int, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return 0, err
+	}
+
+	installDir := filepath.Join(homeDir, ".open-coder")
+	entries, err := os.ReadDir(installDir)
+	if err != nil {
+		return 0, err
+	}
+
+	connected := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "-cli") {
+			continue
+		}
+
+		serverName := strings.TrimSuffix(entry.Name(), "-cli")
+		serverPath := filepath.Join(installDir, entry.Name())
+
+		// Check if executable
+		info, err := entry.Info()
+		if err != nil || info.Mode()&0111 == 0 {
+			continue
+		}
+
+		if err := a.AddMCPServer(serverName, serverPath, []string{}); err == nil {
+			connected++
+		}
+	}
+
+	return connected, nil
+}

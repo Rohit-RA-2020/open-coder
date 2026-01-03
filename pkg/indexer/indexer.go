@@ -2,16 +2,33 @@ package indexer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
-	"github.com/pterm/pterm"
 	"github.com/qdrant/go-client/qdrant"
 )
+
+// ProgressCallback is called during indexing to report progress
+type ProgressCallback func(current, total int, filename string)
+
+// IndexMarker stores metadata about indexed directories
+type IndexMarker struct {
+	IndexedAt      time.Time `json:"indexed_at"`
+	CollectionName string    `json:"collection_name"`
+	FilesProcessed int       `json:"files_processed"`
+	ChunksCreated  int       `json:"chunks_created"`
+	Version        string    `json:"version"`
+}
+
+// MarkerFileName is the hidden file used to track indexed directories
+const MarkerFileName = ".open-coder-index"
 
 // Indexer handles the codebase indexing process
 type Indexer struct {
@@ -54,32 +71,76 @@ func NewIndexer(config *Config) (*Indexer, error) {
 	}, nil
 }
 
-// IndexDirectory indexes an entire directory
+// IsDirectoryIndexed checks if a directory has already been indexed
+func IsDirectoryIndexed(dirPath string) (*IndexMarker, bool) {
+	markerPath := filepath.Join(dirPath, MarkerFileName)
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		return nil, false
+	}
+
+	var marker IndexMarker
+	if err := json.Unmarshal(data, &marker); err != nil {
+		return nil, false
+	}
+
+	return &marker, true
+}
+
+// writeIndexMarker writes the index marker file
+func writeIndexMarker(dirPath string, marker *IndexMarker) error {
+	markerPath := filepath.Join(dirPath, MarkerFileName)
+	data, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(markerPath, data, 0600) // Only readable by owner
+}
+
+// IndexDirectory indexes an entire directory (no progress callback)
 func (idx *Indexer) IndexDirectory(ctx context.Context, dirPath string) error {
+	_, _, err := idx.IndexDirectoryWithProgress(ctx, dirPath, nil)
+	return err
+}
+
+// IndexDirectoryWithProgress indexes a directory with progress callback
+func (idx *Indexer) IndexDirectoryWithProgress(ctx context.Context, dirPath string, onProgress ProgressCallback) (int, int, error) {
 	// Create collection name from absolute path
 	absPath, err := filepath.Abs(dirPath)
 	if err != nil {
-		return fmt.Errorf("failed to get absolute path: %w", err)
+		return 0, 0, fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
 	collectionName := idx.sanitizeCollectionName(absPath)
-	pterm.FgLightBlue.Printf("Collection name: %s\n", collectionName)
 
 	// Create or verify collection
 	if err := idx.ensureCollection(ctx, collectionName); err != nil {
-		return err
+		return 0, 0, err
 	}
 
 	// Discover files
 	filesToProcess, err := idx.scanner.ScanDirectory(dirPath)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 
-	pterm.FgLightBlue.Printf("\n📊 Found %d code files to index\n\n", len(filesToProcess))
+	// Process files with callback
+	totalChunks, err := idx.processFilesWithProgress(ctx, filesToProcess, collectionName, dirPath, onProgress)
+	if err != nil {
+		return len(filesToProcess), totalChunks, err
+	}
 
-	// Process files with progress bar
-	return idx.processFiles(ctx, filesToProcess, collectionName, dirPath)
+	// Write index marker
+	marker := &IndexMarker{
+		IndexedAt:      time.Now(),
+		CollectionName: collectionName,
+		FilesProcessed: len(filesToProcess),
+		ChunksCreated:  totalChunks,
+		Version:        "2.0.0",
+	}
+	_ = writeIndexMarker(absPath, marker)
+
+	return len(filesToProcess), totalChunks, nil
 }
 
 // sanitizeCollectionName creates a valid collection name from a path
@@ -99,11 +160,9 @@ func (idx *Indexer) ensureCollection(ctx context.Context, collectionName string)
 	}
 
 	if exists {
-		pterm.FgLightYellow.Println("⚠️  Collection already exists. Re-indexing will add new chunks.")
-		return nil
+		return nil // Collection already exists
 	}
 
-	pterm.FgLightBlue.Println("Creating new collection...")
 	err = idx.qdrantClient.CreateCollection(ctx, &qdrant.CreateCollection{
 		CollectionName: collectionName,
 		VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
@@ -115,45 +174,44 @@ func (idx *Indexer) ensureCollection(ctx context.Context, collectionName string)
 		return fmt.Errorf("failed to create collection: %w", err)
 	}
 
-	pterm.FgLightGreen.Println("✅ Collection created successfully")
 	return nil
 }
 
-// processFiles processes all discovered files
-func (idx *Indexer) processFiles(ctx context.Context, files []string, collectionName, basePath string) error {
+// processFilesWithProgress processes all discovered files with progress callback
+func (idx *Indexer) processFilesWithProgress(ctx context.Context, files []string, collectionName, basePath string, onProgress ProgressCallback) (int, error) {
 	totalChunks := 0
-	progressBar, _ := pterm.DefaultProgressbar.WithTotal(len(files)).WithTitle("Indexing files").Start()
 
-	for _, filePath := range files {
+	for i, filePath := range files {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return totalChunks, ctx.Err()
+		default:
+		}
+
 		relPath, _ := filepath.Rel(basePath, filePath)
+
+		// Call progress callback
+		if onProgress != nil {
+			onProgress(i+1, len(files), relPath)
+		}
 
 		// Chunk the file (uses AST-based or line-based chunking based on config)
 		chunks, err := ChunkFile(filePath, idx.config)
 		if err != nil {
-			pterm.FgLightRed.Printf("⚠️  Failed to chunk %s: %v\n", relPath, err)
-			progressBar.Increment()
-			continue
+			continue // Skip files that can't be chunked
 		}
 
 		// Process each chunk
 		for _, chunk := range chunks {
 			if err := idx.processChunk(ctx, chunk, relPath, collectionName); err != nil {
-				pterm.FgLightRed.Printf("⚠️  Failed to process %s:%d-%d: %v\n",
-					relPath, chunk.StartLine, chunk.EndLine, err)
-				continue
+				continue // Skip chunks that fail
 			}
 			totalChunks++
 		}
-
-		progressBar.Increment()
 	}
 
-	progressBar.Stop()
-	pterm.FgLightGreen.Printf("\n✅ Indexing complete! Processed %d chunks from %d files\n",
-		totalChunks, len(files))
-	pterm.FgLightBlue.Printf("📦 Collection: %s\n", collectionName)
-
-	return nil
+	return totalChunks, nil
 }
 
 // processChunk processes a single file chunk

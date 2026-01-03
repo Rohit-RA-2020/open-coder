@@ -1,21 +1,21 @@
 # Open Coder 🤖
-![Example Screenshot](example.png)
+![Example Screenshot](images/1.png)
+![Example Screenshot](images/2.png)
 
 A powerful AI coding agent that can interact with your codebase through natural language conversations while having full access to create, read, delete, and update files using the Model Context Protocol (MCP).
 
 ## 🌟 Features
 
+- **Modern TUI Interface**: aesthetic split-pane terminal UI built with Bubble Tea
+- **Interactive File Tree**: Browse and select files from a sidebar
+- **Code Panel**: View and scroll through code files with syntax highlighting
 - **Natural Language Interface**: Chat with the AI agent using plain English
 - **File System Operations**: Complete CRUD (Create, Read, Update, Delete) operations on files
 - **Model Context Protocol (MCP)**: Extensible tool system for adding new capabilities
 - **Streaming Responses**: Real-time AI responses with tool execution feedback
-- **Interactive Chat Loop**: REPL-style interface for continuous conversations
 - **Multi-server Support**: Connect to multiple MCP servers simultaneously
-- **Interactive Settings Menu**: Customize colors, display options, and chat behavior
-- **File Browser Integration**: Use `@` command to interactively browse and reference files
+- **Themes**: Switch between Dark and Light modes on the fly
 - **Codebase Indexing**: Use `/index` command to index your codebase for semantic search with vector embeddings
-- **Color Customization**: Personalize the appearance with different color schemes
-- **Display Options**: Toggle compact mode, timestamps, and hidden file visibility
 - **Auto-save Conversations**: Automatically save chat history to files
 - **Tool Call Cancellation**: Cancel long-running tool calls with Ctrl+C without interrupting the conversation
 
@@ -23,7 +23,7 @@ A powerful AI coding agent that can interact with your codebase through natural 
 
 ```
 open-coder/
-├── main.go                 # Main AI agent implementation
+├── main.go                 # Main entry point
 ├── go.mod                 # Go module dependencies
 ├── go.sum                 # Dependency checksums
 ├── README.md              # This file
@@ -37,6 +37,12 @@ open-coder/
 │       ├── indexer.go     # Main indexing orchestration
 │       ├── config.example.go  # Example configurations
 │       └── README.md      # Indexer documentation
+├── ui/                    # TUI Implementation (Bubble Tea)
+│   ├── model.go           # Main UI model
+│   ├── view.go            # View rendering logic
+│   ├── styles.go          # Lipgloss styles
+│   ├── filetree.go        # Interactive file tree component
+│   └── codepanel.go       # Code viewer component
 └── tools/                 # MCP server tools directory
     ├── file-access/       # File operations MCP server
     │   ├── main.go        # Server implementation
@@ -146,7 +152,7 @@ func main() {
 ### 1. Clone and Setup
 
 ```bash
-cd /Users/shivanshi/Documents/open-coder
+cd open-coder
 ```
 
 ### 2. Install Dependencies
@@ -195,68 +201,32 @@ export OPENAI_MODEL="gpt-4o-mini"  # or your preferred model
 
 ## 💬 Usage
 
-Once running, the agent provides an interactive chat interface:
+The new interface features a modern TUI with split panes:
+- **Left**: File Tree (browse directory structure)
+- **Center**: Chat Interface (talk to the agent)
+- **Right**: Code Panel (view selected files)
 
-```
-==================================================
-                     OPEN CODER
-Open-Coder: A open source CLI coding Agent
---------------------------------------------------
-🤖 Assistant initialized successfully!
-💡 Type '/settings' to customize appearance or '@' to browse and reference files
-🛠️  All tools loaded successfully!
-==================================================
+### ⌨️ Key Bindings
 
-You ▸
-
-Assistant ▸
---------------------------------------------------
-```
+| Key | Action |
+|-----|--------|
+| `Tab` | Cycle focus (File Tree -> Chat -> Code Panel) |
+| `Shift+Tab` | Reverse cycle focus |
+| `F1` | Toggle Sidebar (File Tree) |
+| `F2` | Toggle Code Panel |
+| `Ctrl+T` | Toggle Theme (Light/Dark) |
+| `Ctrl+L` | Clear Chat |
+| `PgUp`/`PgDn` | Scroll Chat History |
+| `Enter` | Send Message (in Chat) |
+| `Ctrl+C` | Cancel Tool / Quit |
 
 ### Interactive Commands
 
-- **`/settings`** - Open the interactive settings menu to customize:
-  - 🎨 **Appearance**: Customize colors for assistant, user, system, tools, and error messages
-  - 🖥️  **Display Options**: Toggle compact mode, timestamps, and hidden file visibility
-  - 💾 **Chat Behavior**: Enable/disable auto-save conversations
-  - 🔌 **MCP Server Settings**: Manage connected servers and refresh tools
-  - ⚙️  **Configuration**: Update API key, base URL, and model settings
-
-- **`/index`** - Index the current codebase for semantic search:
-  - 📂 Recursively discovers all code files in the current directory
-  - 🌳 **AST-based semantic chunking** for Go, JS/TS, Python (extracts functions, classes, methods)
-  - 📝 Falls back to line-based chunking for other languages
-  - 🤖 Generates AI summaries with code descriptions and pseudo code
-  - 🔢 Creates vector embeddings from summaries
-  - 💾 Stores in Qdrant vector database with rich metadata (symbol, kind, parent)
-  - 🔍 Enables powerful semantic code search
-
-- **`@`** - Open the interactive file browser to select and reference files in your messages
-
-### Basic File Operations
-
-```
-You > Create a new Python file with a hello world function
-
-Assistant:
-🔧 Executing tools...
-⚙️  Calling: write_file
-✅ Tool completed: write_file
-
-You > Read the file I just created
-
-Assistant:
-🔧 Executing tools...
-⚙️  Calling: read_file
-✅ Tool completed: read_file
-
-You > List all Python files in the current directory
-
-Assistant:
-🔧 Executing tools...
-⚙️  Calling: search_files
-✅ Tool completed: search_files
-```
+- **`/settings`** - Open the interactive settings menu
+- **`/index`** - Index the current codebase (indexes are now persisted!)
+- **`/help`** - Show help menu
+- **`/theme`** - Toggle color theme
+- **`@`** - Open file browser (legacy command, now you can also just click or navigate the file tree)
 
 ### Codebase Indexing with `/index`
 
@@ -266,482 +236,106 @@ The `/index` command creates a semantic search index of your entire codebase:
 You > /index
 
 📂 Indexing codebase at: /home/user/project
-This will:
-  • Discover all code files recursively
-  • Break them into chunks of 100 lines (with 10 line overlap)
-  • Generate summaries and embeddings
-  • Store in Qdrant vector database
-
-Do you want to continue? (y/N): y
-
-Collection name: codebase_home_user_project
-Creating new collection...
-✅ Collection created successfully
-
-📊 Found 15 code files to index
-
-Indexing files ████████████████████ 100%
-
-✅ Indexing complete! Processed 47 chunks from 15 files
-📦 Collection: codebase_home_user_project
+📊 Indexing [████████░░] 80/100 - pkg/indexer/main.go
+...
+✅ Indexing complete! 15 files → 47 chunks
 ```
+
+**New in v2.0**:
+- **Persistence**: Indexes are saved to disk (`.open-coder-index`) and reused.
+- **Progress**: Real-time progress bar UI.
+- **Smart Updates**: Only re-indexes changed files (coming soon).
 
 **How it works:**
-1. **File Discovery**: Scans all code files (.go, .py, .js, .ts, etc.) in the current directory
-2. **Smart Chunking**: 
-   - **AST-based** (Go, JS/TS, Python): Extracts functions, classes, methods as semantic units
-   - **Line-based** (other languages): Falls back to overlapping chunks (0-100, 90-190, etc.)
-   - Large functions (>200 lines) are split into sub-chunks with overlap
-3. **Summarization**: Uses AI to create concise summaries with pseudo code for each chunk
-4. **Embedding**: Generates vector embeddings from summaries using OpenAI's text-embedding-3-small
-5. **Storage**: Stores vectors in Qdrant with rich metadata (filename, lines, summary, symbol, kind, parent, language)
-
-**Collection Naming**: Collections are named based on the absolute path of the directory (e.g., `codebase_home_user_project`)
-
-**Requirements**: 
-- Qdrant running on `localhost:6334`
-- The indexing feature uses pre-configured Azure OpenAI endpoints
-
-**Customization**: The indexing logic is modular and located in `pkg/indexer/`. You can easily:
-- Switch between AST and line-based chunking (`ChunkMode`: "ast" or "lines")
-- Configure AST-supported languages (`ASTLanguages`)
-- Adjust large function split threshold (`MaxChunkLines`, default: 200)
-- Modify file extensions to index (`CodeExtensions`)
-- Add/remove ignored directories and patterns
-- Adjust chunk size and overlap for line-based/sub-chunk splitting
-- See `pkg/indexer/README.md` for detailed customization options
-
-### Advanced Usage with File Browser
-
-```
-You > @ Create a function in the file I want to select
-
-Assistant:
-🔍 File Browser - Select a file to reference:
-📁 Current directory: /Users/shivanshi/Documents/open-coder
-📂 Directories:
-  1. 📁 tools
-📄 Files:
-  2. 📄 main.go
-  3. 📄 README.md
-
-Enter choice: 2
-✅ Selected file: /Users/shivanshi/Documents/open-coder/main.go
-📎 File path inserted: /Users/shivanshi/Documents/open-coder/main.go
-
-Assistant:
-🔧 Executing tools...
-⚙️  Calling: read_file
-✅ Tool completed: read_file
-```
+1. **File Discovery**: Scans all code files.
+2. **Smart Chunking**: AST-based (Go, JS/TS, Python) or line-based chunking.
+3. **Summarization**: AI generates summaries with pseudo-code.
+4. **Embedding**: Generates vector embeddings.
+5. **Storage**: Stores vectors in Qdrant with rich metadata.
 
 ### Tool Call Cancellation
 
-Open-Coder supports canceling long-running tool calls. You can interrupt the tool execution by pressing `Ctrl+C` in your terminal. The agent will gracefully stop the tool and continue the conversation.
-
-#### How to Cancel a Tool Call
-
-When a tool is running, you'll see:
-```
-⏳ Tool execution in progress...
-💡 Press Ctrl+C to cancel this tool call (conversation will continue)
-────────────────────────────────────────────────────────────
-```
-
-Simply press **Ctrl+C** to cancel the execution:
-```
-📍 Cancellation signal received...
-⏹️  Tool execution cancelled - run_command was interrupted midway.
-```
-
-#### Why Cancel Tool Calls?
-
-- **Timeouts**: If a tool is taking longer than expected
-- **Wrong Input**: If you realize you provided incorrect parameters
-- **Experimentation**: To try a different approach without waiting for completion
-- **Resource Management**: To prevent resource-intensive operations
-
-#### After Cancellation
-
-✅ The conversation continues normally  
-✅ The AI receives information about which tool was cancelled  
-✅ The AI can suggest alternatives or ask for clarification  
-✅ You can proceed with the next command immediately  
-
-**Example:**
-```
-You ▸ Run a slow analysis on all files
-
-Assistant ▸
-⏳ Tool execution in progress...
-💡 Press Ctrl+C to cancel this tool call (conversation will continue)
-
-[After 5 seconds, you press Ctrl+C]
-
-📍 Cancellation signal received...
-⏹️  Tool execution cancelled - run_command was interrupted midway.
-
-The assistant understands:
-"The user cancelled the tool execution midway. Tool: run_command was interrupted and did not complete."
-
-Assistant ▸ I see you cancelled that operation. Would you like to:
-- Analyze a subset of files instead?
-- Try a different approach?
-- Move on to something else?
-```
-
-#### Key Features
-
-✓ **No Hardcoded Timeouts** - You decide when to cancel  
-✓ **Flexible Duration** - Different tools can take different amounts of time  
-✓ **Clear Feedback** - Immediate message shows which tool was cancelled  
-✓ **Smart Recovery** - AI understands the cancellation and responds appropriately  
-✓ **Conversation Awareness** - The cancellation is logged in conversation history  
-
-## 🔌 Available Commands
-
-- **`read_file`** - Read file contents
-  ```json
-  {
-    "path": "example.py",
-    "offset": 1,
-    "limit": 10
-  }
-  ```
-
-- **`read_line_range`** - Read specific lines or a range from a file
-  ```json
-  {
-    "path": "example.py",
-    "start_line": 5,
-    "end_line": 15,
-    "show_line_numbers": true
-  }
-  ```
-
-- **`write_file`** - Create or update files
-  ```json
-  {
-    "path": "new_file.txt",
-    "content": "Hello, World!"
-  }
-  ```
-
-- **`edit_line_range`** - Edit specific lines or a range in a file
-  ```json
-  {
-    "path": "src/main.go",
-    "start_line": 10,
-    "end_line": 12,
-    "content": "new line 1\\nnew line 2",
-    "operation": "replace"
-  }
-  ```
-
-- **`list_directory`** - List directory contents
-  ```json
-  {
-    "path": "./",
-    "recursive": true
-  }
-  ```
-
-- **`search_files`** - Find files by pattern
-  ```json
-  {
-    "pattern": "*.go"
-  }
-  ```
-
-- **`search_content`** - Search text in files
-  ```json
-  {
-    "pattern": "TODO",
-    "context_lines": 3
-  }
-  ```
-
-- **`delete_file`** - Remove files/directories
-  ```json
-  {
-    "path": "old_file.txt",
-    "recursive": false
-  }
-  ```
-
-### Terminal Operations
-
-- **`run_terminal_cmd`** - Execute system commands
-  ```json
-  {
-    "command": "ls -la",
-    "is_background": false
-  }
-  ```
-
-- **`run_terminal_cmd_with_input`** - Execute commands with input
-  ```json
-  {
-    "command": "python3",
-    "input": "print('Hello, World!')",
-    "is_background": false
-  }
-  ```
+Open-Coder supports canceling long-running tool calls. You can interrupt the tool execution by pressing `Ctrl+C`. The agent will gracefully stop the tool and continue the conversation.
 
 ## ⚙️ Configuration
 
 ### Interactive Settings Menu
 
-Access the settings menu by typing `/settings` during any conversation:
-
-```
-⚙️  SETTINGS
-Choose a category:
-1. 🎨 Appearance (Colors)
-2. 🖥️  Display Options
-3. 💾 Chat Behavior
-4. 🔌 MCP Server Settings
-
-0. Back to Chat
-```
-
-#### Appearance Settings (🎨)
-Customize the color scheme for different message types:
-- **Assistant text color** - Color for AI responses
-- **User input color** - Color for your messages
-- **System message color** - Color for system notifications
-- **Tool output color** - Color for tool execution results
-- **Error message color** - Color for error messages
-
-Available colors: Light Cyan, Cyan, Light Blue, Blue, Light Green, Green, Light Yellow, Yellow, Light Red, Red, Light Magenta, Magenta, Light White, White, Gray, Black
-
-#### Display Options (🖥️)
-Configure display behavior:
-- **Display Mode**: Toggle between Normal and Compact modes
-- **Show Timestamps**: Enable/disable timestamps in messages
-- **Show Hidden Files**: Toggle visibility of hidden files in file browser
-
-#### Chat Behavior (💾)
-Configure conversation settings:
-- **Auto-save Chat**: Enable/disable automatic saving of conversations
-
-#### MCP Server Settings (🔌)
-Manage connected MCP servers:
-- View connected servers and their configurations
-- Refresh tool definitions from servers
-- Monitor server status
-
-#### Configuration Settings (⚙️)
-Manage your OpenAI configuration:
-- **Change API Key**: Update your OpenAI API key (displayed masked for security)
-- **Change Base URL**: Modify the API endpoint URL
-- **Change Model**: Switch between different AI models (gpt-4o, gpt-4o-mini, etc.)
-- **Reset Configuration**: Delete saved configuration and re-enter on next startup
-
-**Note**: Changes are automatically saved and take effect immediately. Environment variables still override saved settings.
-
-### File Browser Integration
-Use the `@` command to interactively browse and select files to reference in your messages:
-
-```
-🔍 File Browser - Select a file to reference:
-📁 Current directory: /Users/shivanshi/Documents/open-coder
-📂 Directories:
-  1. 📁 tools
-📄 Files:
-  2. 📄 main.go
-  3. 📄 README.md
-
-Navigation: [number] Select | [..] Parent dir | [~] Home | [.] Current dir | [/] Root | [q] Cancel (Hidden: OFF)
-```
-
-**Navigation Commands:**
-- **number** - Select a file or directory by its number
-- **`..`** - Go to parent directory
-- **`~`** - Go to home directory
-- **`.`** - Stay in current directory
-- **`/`** - Go to root directory
-- **`q`** - Cancel file selection
-
-**File Browser Settings:**
-- **Show Hidden Files**: Toggle to show/hide files starting with `.`
-- **Current Directory**: Displays and tracks your current location
-- **File Type Indicators**: 📁 for directories, 📄 for files
+Access the settings menu by typing `/settings` during any conversation. You can customize:
+- 🎨 **Appearance**: Colors for all UI elements
+- 🖥️  **Display Options**: Timestamps, Hidden files
+- 💾 **Chat Behavior**: Auto-save settings
+- 🔌 **MCP Servers**: Manage connections
+- ⚙️  **API Config**: Update OpenAI keys/models
 
 ### Environment Variables
 
 | Variable | Description | Required | Default |
 |----------|-------------|----------|---------|
-| `OPENAI_API_KEY` | Your OpenAI API key (for chat) | ✅ | - |
-| `OPENAI_BASE_URL` | API endpoint URL (for chat) | ✅ | - |
-| `OPENAI_MODEL` | Model to use (for chat) | ✅ | - |
-
-**Note**: Indexing uses pre-configured Azure OpenAI endpoints.
-
-### Supported Models
-
-- `gpt-4o`
-- `gpt-4o-mini`
-- `gpt-4-turbo`
-- `gpt-4`
-- `gpt-3.5-turbo`
-- Any other OpenAI-compatible model
+| `OPENAI_API_KEY` | Your OpenAI API key | ✅ | - |
+| `OPENAI_BASE_URL` | API endpoint URL | ✅ | - |
+| `OPENAI_MODEL` | Model to use | ✅ | - |
 
 ## 🏗️ Architecture
 
 ### Core Components
 
-1. **SimpleAgent**: Main agent struct that manages:
-   - OpenAI client connection
-   - MCP server connections
-   - Conversation state
-   - Tool execution
-
-2. **MCP Server**: Model Context Protocol server providing:
-   - Tool definitions
-   - Tool execution
-   - JSON-RPC communication
-
-3. **File Operations Tool**: Specialized MCP server offering:
-   - File I/O operations
-   - Directory management
-   - Search functionality
+1. **Agent Logic**: Manages OpenAI connection and tool execution loop.
+2. **TUI (Bubble Tea)**: Handles the terminal user interface, rendering, and input.
+3. **MCP Client**: Connects to MCP servers for capabilities (file access, terminal).
+4. **Indexer**: Handles semantic code indexing and search.
 
 ### Data Flow
 
-1. User inputs natural language query
-2. Agent sends query to OpenAI with available tools
-3. OpenAI responds with tool calls if needed
-4. Agent executes tools via MCP servers
-5. Results are fed back into conversation
-6. Process repeats until completion
+```mermaid
+graph TD
+    User[User Input] --> TUI[TUI (Bubble Tea)]
+    TUI --> Agent[Agent Logic]
+    Agent --> OpenAI[OpenAI API]
+    OpenAI --> Agent
+    Agent --> MCP[MCP Client]
+    MCP --> Tools[Tools (File/Term)]
+    Tools --> MCP
+    MCP --> Agent
+    Agent --> TUI
+```
 
 ## 🔒 Security Notes
 
-- File operations are executed in the current working directory
-- No path traversal protection (use with caution)
-- Recursive deletion operations can be dangerous
-- Always backup important files before using delete operations
-- The agent has full file system access within the execution context
+- File operations are executed in the current working directory.
+- Recursive deletion operations can be dangerous.
+- Always backup important files before using delete operations.
 
 ## 🛠️ Development
 
 ### Adding New MCP Servers
-
-1. Create a new directory under `tools/`
-2. Implement the MCP server interface
-3. Add server connection in `main.go`
-4. Build and test the new server
-
-### Extending File Operations
-
-The file operations tool can be extended by modifying:
-- `tools/file-access/main.go`
-- Tool definitions and handlers
-- Schema definitions for new operations
+1. Create a new directory under `tools/`.
+2. Implement the MCP server.
+3. Run `./install.sh` to rebuild and connect.
 
 ### Testing
-
 ```bash
-# Test file operations
-cd tools/file-access
-go test ./...
-
-# Test main agent
 go test ./...
 ```
 
 ## 📚 Dependencies
 
-- **github.com/modelcontextprotocol/go-sdk**: MCP protocol implementation
-- **github.com/openai/openai-go/v2**: OpenAI API client
-- **github.com/mark3labs/mcp-go**: Additional MCP utilities
+- **charmbracelet/bubbletea**: Terminal UI framework
+- **charmbracelet/lipgloss**: CSS for terminal
+- **charmbracelet/glamour**: Markdown rendering
+- **modelcontextprotocol/go-sdk**: MCP implementation
+- **openai/openai-go**: OpenAI client
+- **qdrant/go-client**: Vector database client
 
 ## 🤝 Contributing
-
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+4. Submit a pull request
 
 ## 📄 License
-
-This project is open source and available under the MIT License.
+MIT License
 
 ## 🆘 Troubleshooting
-
-### Common Issues
-
-1. **"Could not connect to file-ops server"**
-   - Ensure the binary is built: `go build -o tools/file-access/file-ops-cli tools/file-access/main.go`
-   - Check file permissions
-
-2. **"Could not connect to terminal server"**
-   - Ensure the binary is built: `go build -o tools/terminal/terminal-cli tools/terminal/main.go`
-   - Check file permissions
-
-3. **"Tool not found in any connected server"**
-   - Verify all environment variables are set
-   - Check that MCP servers are properly connected
-   - Try refreshing tools using `/settings` → MCP Server Settings → Refresh tools
-
-4. **Permission denied errors**
-   - Run from a directory with appropriate file permissions
-   - Check user permissions for file operations
-
-5. **Settings menu not working**
-   - Ensure you type `/settings` exactly (case-sensitive)
-   - Check that your terminal supports the required characters
-
-6. **File browser (@ command) not working**
-   - Ensure you type `@` followed by your message
-   - Check that the current directory has read permissions
-   - Try toggling "Show Hidden Files" in display settings if needed
-
-7. **Colors not displaying correctly**
-   - Check your terminal's color support
-   - Some terminals may not support all color options
-   - Try different color schemes in appearance settings
-
-8. **Indexing (`/index`) fails or times out**
-   - Ensure Qdrant is running on `localhost:6334` (default port)
-   - Check your OpenAI API key and quota
-   - For large codebases, indexing may take a while - be patient
-   - Verify you have write permissions in the current directory
-
-9. **"Failed to connect to Qdrant"**
-   - Install and start Qdrant: `docker run -p 6334:6334 qdrant/qdrant`
-   - Or download from: https://qdrant.tech/documentation/quick-start/
-   - Verify Qdrant is accessible at `localhost:6334`
-
-10. **"Failed to generate embedding" errors during indexing**
-   - The indexing feature uses pre-configured Azure OpenAI endpoints
-   - Ensure Qdrant is running and accessible
-   - Check network connectivity to Azure OpenAI endpoints
-   - The endpoints and API keys are hardcoded in the agent initialization
-
-### Getting Help
-
-- Check the error messages for specific guidance
-- Review the MCP server logs
-- Ensure all dependencies are properly installed
-
-## 🎯 Use Cases
-
-- **Code Generation**: Create new files and functions
-- **Code Analysis**: Read and analyze existing codebases
-- **File Management**: Organize and search through projects
-- **Refactoring**: Update multiple files systematically
-- **Documentation**: Create and update README files
-- **Testing**: Generate test files and data
-- **System Administration**: Execute terminal commands and scripts
-- **Interactive Development**: Browse and reference files during conversations
-- **Semantic Code Search**: Index and search codebases using AI-powered vector embeddings
-- **Knowledge Base Creation**: Build searchable knowledge bases from your code
-- **Customizable Workflow**: Personalize the interface with colors and display options
-- **Multi-server Toolchains**: Combine multiple MCP servers for complex tasks
-
----
-
-**Happy coding with your AI assistant!** 🚀
+- **Rendering Issues**: Ensure your terminal supports true color (e.g., iTerm2, Alacritty, VS Code Terminal).
+- **Font Issues**: A Nerd Font is recommended for icons (though standard unicode is used where possible).
