@@ -185,6 +185,13 @@ type IndexingErrorMsg struct {
 	Err error
 }
 
+// GitDiffResultMsg contains the result of a git diff command
+type GitDiffResultMsg struct {
+	Diff   string
+	Error  error
+	Staged bool
+}
+
 // WindowSizeMsg is sent when terminal size changes
 type WindowSizeMsg struct {
 	Width  int
@@ -216,6 +223,7 @@ const (
 	ViewApproval
 	ViewIndexing
 	ViewHelp
+	ViewDiff
 )
 
 // PanelFocus represents which panel is currently focused in split-pane layout

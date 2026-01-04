@@ -66,6 +66,9 @@ type Model struct {
 	indexingCurrent int
 	indexingTotal   int
 	indexingFile    string
+
+	// Diff panel state
+	diffPanel *DiffPanel
 }
 
 // AgentInterface defines the backend operations the UI needs
@@ -121,6 +124,7 @@ func New(agent AgentInterface) Model {
 		fileTree:      NewFileTree(wd, styles),
 		codePanel:     NewCodePanel(styles),
 		filePicker:    &fp,
+		diffPanel:     NewDiffPanel(styles),
 		view:          ViewChat,
 		panelFocus:    PanelChat,
 		messages:      []ChatMessage{},
@@ -341,6 +345,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.codePanel.SetContent(msg.Content, msg.Language)
 		}
 		return m, nil
+
+	case GitDiffResultMsg:
+		// Handle git diff result
+		if m.diffPanel != nil {
+			if msg.Error != nil {
+				m.diffPanel.Error = msg.Error
+			} else {
+				m.diffPanel.Error = nil
+				m.diffPanel.Staged = msg.Staged
+				m.diffPanel.ParseDiff(msg.Diff)
+			}
+			m.diffPanel.Width = m.width - 6
+			m.diffPanel.Height = m.height - 4
+		}
+		return m, nil
 	}
 
 	// Update textarea
@@ -370,6 +389,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleFilePickerKeys(msg)
 	case ViewSettings:
 		return m.handleSettingsKeys(msg)
+	case ViewDiff:
+		return m.handleDiffKeys(msg)
 	}
 
 	switch msg.Type {
@@ -441,6 +462,17 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyF2:
 		m.showCodePanel = !m.showCodePanel
+		return m, nil
+
+	case tea.KeyF3:
+		// Toggle diff view
+		if m.view == ViewDiff {
+			m.view = ViewChat
+			m.textarea.Focus()
+		} else {
+			m.view = ViewDiff
+			return m, FetchDiff(false, "")
+		}
 		return m, nil
 	}
 
@@ -546,6 +578,25 @@ func (m Model) handleSettingsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleDiffKeys handles key input in diff view
+func (m Model) handleDiffKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.view = ViewChat
+		m.textarea.Focus()
+		return m, nil
+	}
+
+	// Delegate to diff panel for navigation
+	if m.diffPanel != nil {
+		newPanel, cmd := m.diffPanel.Update(msg)
+		m.diffPanel = newPanel
+		return m, cmd
+	}
+
+	return m, nil
+}
+
 // applyAccentColor applies the current accent color to the theme
 func (m *Model) applyAccentColor() tea.Cmd {
 	color := lipgloss.Color(m.accentColor.Hex())
@@ -596,6 +647,14 @@ func (m Model) handleCommand(content string) (ViewState, tea.Cmd) {
 
 	case lower == "exit" || lower == "quit" || lower == "bye":
 		return ViewChat, tea.Quit
+
+	case lower == "/diff":
+		// Show unstaged changes
+		return ViewDiff, FetchDiff(false, "")
+
+	case lower == "/diff --staged" || lower == "/diff -s":
+		// Show staged changes
+		return ViewDiff, FetchDiff(true, "")
 
 	case strings.HasPrefix(content, "@"):
 		return ViewFilePicker, nil
@@ -678,17 +737,23 @@ func (m *Model) updateViewport() {
 func (m *Model) renderMessage(msg ChatMessage) string {
 	var label, content string
 
+	// Calculate max width for content (leave room for label)
+	maxWidth := m.width - 20
+	if maxWidth < 40 {
+		maxWidth = 40
+	}
+
 	switch msg.Role {
 	case RoleUser:
 		label = m.styles.MessageLabel.Foreground(m.styles.Theme.UserMessage).Render("You ▸")
-		content = m.styles.MessageUser.Render(msg.Content)
+		content = m.styles.MessageUser.Width(maxWidth).Render(msg.Content)
 
 	case RoleAssistant:
 		label = m.styles.MessageLabel.Foreground(m.styles.Theme.AssistantMessage).Render("Assistant ▸")
 		// Try to render as markdown
 		rendered, err := m.renderer.Render(msg.Content)
 		if err != nil {
-			content = m.styles.MessageAssist.Render(msg.Content)
+			content = m.styles.MessageAssist.Width(maxWidth).Render(msg.Content)
 		} else {
 			content = strings.TrimSpace(rendered)
 		}
@@ -698,11 +763,11 @@ func (m *Model) renderMessage(msg ChatMessage) string {
 
 	case RoleSystem:
 		label = m.styles.MessageLabel.Foreground(m.styles.Theme.SystemMessage).Render("System ▸")
-		content = m.styles.MessageSystem.Render(msg.Content)
+		content = m.styles.MessageSystem.Width(maxWidth).Render(msg.Content)
 
 	case RoleTool:
 		label = m.styles.MessageLabel.Foreground(m.styles.Theme.ToolMessage).Render("Tool ▸")
-		content = m.styles.MessageTool.Render(msg.Content)
+		content = m.styles.MessageTool.Width(maxWidth).Render(msg.Content)
 	}
 
 	return fmt.Sprintf("%s %s", label, content)
@@ -748,6 +813,8 @@ func (m Model) View() string {
 		return m.renderFilePicker()
 	case ViewSettings:
 		return m.renderSettings()
+	case ViewDiff:
+		return m.renderDiff()
 	default:
 		// Show welcome screen if user hasn't started chatting yet
 		if !m.hasUserInteracted && !m.isProcessing {
@@ -939,7 +1006,7 @@ func (m Model) renderStatusBar() string {
 	}
 
 	// Help hint
-	items = append(items, m.styles.Help.Render("Tab: switch panel · F1: files · F2: code · Ctrl+T: theme · Ctrl+Q: quit"))
+	items = append(items, m.styles.Help.Render("Tab: panel · F1: files · F2: code · F3: diff · Ctrl+Q: quit"))
 
 	return m.styles.StatusBar.Width(m.width).Render(
 		strings.Join(items, " │ "),
@@ -958,6 +1025,7 @@ func (m Model) renderHelp() string {
 | Shift+Tab | Switch panel focus (reverse) |
 | F1 | Toggle file tree sidebar |
 | F2 | Toggle code panel |
+| F3 | Toggle git diff view |
 | Ctrl+C | Cancel current tool / Quit |
 | Ctrl+Q | Quit |
 | Ctrl+T | Toggle dark/light theme |
@@ -971,6 +1039,7 @@ func (m Model) renderHelp() string {
 | File Tree | j/k: nav · Enter: select · h/l: collapse/expand |
 | Chat | Type and Enter to send |
 | Code Panel | j/k: nav · g/G: top/bottom · PgUp/PgDn: page |
+| Diff View | h/l: switch panels · j/k: scroll · n/N: hunks |
 
 # Commands
 
@@ -980,6 +1049,8 @@ func (m Model) renderHelp() string {
 | /clear | Clear chat history |
 | /theme | Toggle theme |
 | /index | Index current codebase |
+| /diff | Show git diff (unstaged) |
+| /diff --staged | Show staged changes |
 | @ | Open file browser |
 | exit | Quit application |
 
@@ -1033,6 +1104,23 @@ func (m Model) renderFilePicker() string {
 		m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
 		m.filePicker.View(),
+	)
+}
+
+// renderDiff renders the git diff view
+func (m Model) renderDiff() string {
+	if m.diffPanel == nil {
+		return m.renderChat()
+	}
+
+	m.diffPanel.Width = m.width - 6
+	m.diffPanel.Height = m.height - 4
+	m.diffPanel.Styles = m.styles
+
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		m.styles.DiffPanel.Render(m.diffPanel.View()),
 	)
 }
 

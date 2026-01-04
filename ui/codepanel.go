@@ -3,6 +3,8 @@ package ui
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/alecthomas/chroma/v2/lexers"
@@ -46,6 +48,22 @@ func (cp *CodePanel) SetProgram(p *tea.Program) {
 
 // LoadFile loads a file into code panel
 func (cp *CodePanel) LoadFile(filePath string) error {
+	// Check if it's an image file - open with system viewer instead
+	if isImageFile(filePath) {
+		return openWithSystemViewer(filePath)
+	}
+
+	// Check if it's a binary file
+	if isBinaryFile(filePath) {
+		cp.FilePath = filePath
+		cp.Content = []string{"[Binary file - cannot display]"}
+		cp.Language = "Binary"
+		cp.StartLine = 1
+		cp.CursorLine = 1
+		cp.Offset = 0
+		return nil
+	}
+
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return err
@@ -118,6 +136,61 @@ func getLanguage(filePath string) string {
 	default:
 		return "PlainText"
 	}
+}
+
+// isImageFile checks if a file is an image based on extension
+func isImageFile(filePath string) bool {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	imageExts := map[string]bool{
+		".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
+		".bmp": true, ".svg": true, ".webp": true, ".ico": true,
+		".tiff": true, ".tif": true, ".heic": true, ".heif": true,
+	}
+	return imageExts[ext]
+}
+
+// isBinaryFile checks if a file is binary by reading first bytes
+func isBinaryFile(filePath string) bool {
+	// Check by extension first
+	ext := strings.ToLower(filepath.Ext(filePath))
+	binaryExts := map[string]bool{
+		".exe": true, ".dll": true, ".so": true, ".dylib": true,
+		".bin": true, ".obj": true, ".o": true, ".a": true,
+		".zip": true, ".tar": true, ".gz": true, ".rar": true, ".7z": true,
+		".pdf": true, ".doc": true, ".docx": true, ".xls": true, ".xlsx": true,
+		".mp3": true, ".mp4": true, ".avi": true, ".mov": true, ".wav": true,
+		".ttf": true, ".otf": true, ".woff": true, ".woff2": true,
+	}
+	if binaryExts[ext] {
+		return true
+	}
+
+	// Read first 512 bytes to check for binary content
+	file, err := os.Open(filePath)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	buf := make([]byte, 512)
+	n, err := file.Read(buf)
+	if err != nil {
+		return false
+	}
+
+	// Check for null bytes (common in binary files)
+	for i := 0; i < n; i++ {
+		if buf[i] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// openWithSystemViewer opens a file with the system default application
+func openWithSystemViewer(filePath string) error {
+	cmd := exec.Command("xdg-open", filePath)
+	return cmd.Start()
 }
 
 // Update handles input for code panel
@@ -237,10 +310,11 @@ func (cp *CodePanel) View() string {
 			lineContent = cp.Content[i]
 		}
 
-		// Truncate line content to fit width
+		// Wrap or truncate line content to fit width
 		maxLineWidth := cp.Width - 12 // Account for line number and padding
 		if maxLineWidth > 0 && len(lineContent) > maxLineWidth {
-			lineContent = lineContent[:maxLineWidth]
+			// Truncate with ellipsis for code panel (wrapping would break code)
+			lineContent = lineContent[:maxLineWidth-1] + "…"
 		}
 
 		// Build line

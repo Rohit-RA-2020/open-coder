@@ -179,6 +179,17 @@ type Styles struct {
 	Warning lipgloss.Style
 	Help    lipgloss.Style
 	Divider lipgloss.Style
+
+	// Diff panel styles
+	DiffAddedLine     lipgloss.Style
+	DiffAddedPrefix   lipgloss.Style
+	DiffRemovedLine   lipgloss.Style
+	DiffRemovedPrefix lipgloss.Style
+	DiffContextLine   lipgloss.Style
+	DiffHunkHeader    lipgloss.Style
+	DiffFileHeader    lipgloss.Style
+	DiffLineNumber    lipgloss.Style
+	DiffPanel         lipgloss.Style
 }
 
 // NewStyles creates a new Styles instance with the given theme
@@ -390,6 +401,55 @@ func NewStyles(theme Theme) Styles {
 
 	s.Divider = lipgloss.NewStyle().
 		Foreground(theme.Border)
+
+	// Diff panel styles - VS Code-inspired
+	var diffAddedBg, diffRemovedBg lipgloss.Color
+	if theme.Name == "dark" {
+		diffAddedBg = lipgloss.Color("#1c3a1c")   // Dark green background
+		diffRemovedBg = lipgloss.Color("#3d1a1a") // Dark red background
+	} else {
+		diffAddedBg = lipgloss.Color("#d4edda")   // Light green background
+		diffRemovedBg = lipgloss.Color("#f8d7da") // Light red background
+	}
+
+	s.DiffAddedLine = lipgloss.NewStyle().
+		Foreground(theme.Success).
+		Background(diffAddedBg)
+
+	s.DiffAddedPrefix = lipgloss.NewStyle().
+		Foreground(theme.Success).
+		Background(diffAddedBg).
+		Bold(true)
+
+	s.DiffRemovedLine = lipgloss.NewStyle().
+		Foreground(theme.Error).
+		Background(diffRemovedBg)
+
+	s.DiffRemovedPrefix = lipgloss.NewStyle().
+		Foreground(theme.Error).
+		Background(diffRemovedBg).
+		Bold(true)
+
+	s.DiffContextLine = lipgloss.NewStyle().
+		Foreground(theme.Subtle)
+
+	s.DiffHunkHeader = lipgloss.NewStyle().
+		Foreground(theme.Info).
+		Bold(true)
+
+	s.DiffFileHeader = lipgloss.NewStyle().
+		Foreground(theme.Primary).
+		Bold(true)
+
+	s.DiffLineNumber = lipgloss.NewStyle().
+		Foreground(theme.Subtle).
+		PaddingRight(1)
+
+	s.DiffPanel = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(theme.BorderFocused).
+		Padding(1, 2).
+		Background(theme.Background)
 
 	return s
 }
