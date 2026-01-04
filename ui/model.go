@@ -82,6 +82,7 @@ type AgentInterface interface {
 	IndexCodebase() tea.Cmd
 	ToggleTerminalApproval()
 	IsTerminalApprovalRequired() bool
+	GenerateCommitMessage(diffContent string, filesChanged, additions, deletions int) tea.Cmd
 }
 
 // New creates a new Model with the given agent backend
@@ -360,6 +361,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffPanel.Height = m.height - 4
 		}
 		return m, nil
+
+	case CommitMessageRequestMsg:
+		// Request AI to generate commit message
+		if m.agent != nil {
+			return m, m.agent.GenerateCommitMessage(msg.DiffContent, msg.FilesChanged, msg.Additions, msg.Deletions)
+		}
+		return m, nil
+
+	case CommitMessageResultMsg:
+		// Handle commit message result
+		if m.diffPanel != nil {
+			m.diffPanel.SetCommitMessage(msg.Message, msg.Error)
+		}
+		return m, nil
 	}
 
 	// Update textarea
@@ -580,6 +595,13 @@ func (m Model) handleSettingsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleDiffKeys handles key input in diff view
 func (m Model) handleDiffKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Check if commit message panel is open - let diff panel handle esc/q first
+	if m.diffPanel != nil && m.diffPanel.ShowCommitMessage {
+		newPanel, cmd := m.diffPanel.Update(msg)
+		m.diffPanel = newPanel
+		return m, cmd
+	}
+
 	switch msg.String() {
 	case "esc", "q":
 		m.view = ViewChat

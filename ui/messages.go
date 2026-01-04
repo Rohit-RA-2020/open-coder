@@ -192,6 +192,20 @@ type GitDiffResultMsg struct {
 	Staged bool
 }
 
+// CommitMessageRequestMsg requests AI to generate a commit message
+type CommitMessageRequestMsg struct {
+	DiffContent  string
+	FilesChanged int
+	Additions    int
+	Deletions    int
+}
+
+// CommitMessageResultMsg contains the AI-generated commit message
+type CommitMessageResultMsg struct {
+	Message string
+	Error   error
+}
+
 // WindowSizeMsg is sent when terminal size changes
 type WindowSizeMsg struct {
 	Width  int

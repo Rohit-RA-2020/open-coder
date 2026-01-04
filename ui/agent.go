@@ -448,6 +448,55 @@ func (a *Agent) IndexCodebase() tea.Cmd {
 	}
 }
 
+// GenerateCommitMessage generates a commit message using AI based on the diff
+func (a *Agent) GenerateCommitMessage(diffContent string, filesChanged, additions, deletions int) tea.Cmd {
+	return func() tea.Msg {
+		// Build a prompt for generating commit message
+		prompt := fmt.Sprintf(`Based on the following git diff, generate a concise and descriptive commit message.
+The commit message should follow conventional commit format (e.g., feat:, fix:, refactor:, docs:, etc.).
+Keep the first line under 72 characters. Add a blank line and bullet points for details if there are multiple significant changes.
+
+Statistics:
+- Files changed: %d
+- Lines added: %d
+- Lines deleted: %d
+
+Diff:
+%s
+
+Generate ONLY the commit message, nothing else.`, filesChanged, additions, deletions, diffContent)
+
+		// Create a one-shot request (not using the conversation history)
+		resp, err := a.openaiClient.Chat.Completions.New(a.ctx, openai.ChatCompletionNewParams{
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				openai.SystemMessage("You are a helpful assistant that generates clear, concise git commit messages following conventional commit format."),
+				openai.UserMessage(prompt),
+			},
+			Model: openai.ChatModel(a.model),
+		})
+
+		if err != nil {
+			return CommitMessageResultMsg{
+				Message: "",
+				Error:   err,
+			}
+		}
+
+		if len(resp.Choices) == 0 {
+			return CommitMessageResultMsg{
+				Message: "",
+				Error:   fmt.Errorf("no response from AI"),
+			}
+		}
+
+		commitMessage := strings.TrimSpace(resp.Choices[0].Message.Content)
+		return CommitMessageResultMsg{
+			Message: commitMessage,
+			Error:   nil,
+		}
+	}
+}
+
 // Close cleans up resources
 func (a *Agent) Close() {
 	a.cancel()

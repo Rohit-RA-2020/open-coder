@@ -79,6 +79,13 @@ type DiffPanel struct {
 	Height       int
 	SidebarWidth int // Width of file sidebar
 	Error        error
+	// Commit message generation state
+	GeneratingCommitMsg bool
+	CommitMessage       string
+	CommitMessageError  error
+	ShowCommitMessage   bool
+	CopiedToClipboard   bool
+	ClipboardError      string
 }
 
 // NewDiffPanel creates a new diff panel
@@ -340,6 +347,41 @@ func (dp *DiffPanel) handleKey(msg tea.KeyMsg) (*DiffPanel, tea.Cmd) {
 		// Toggle between staged/unstaged
 		dp.Staged = !dp.Staged
 		return dp, FetchDiff(dp.Staged, "")
+
+	case "c", "C":
+		// Generate commit message
+		if len(dp.Files) > 0 && !dp.GeneratingCommitMsg {
+			dp.GeneratingCommitMsg = true
+			dp.CommitMessage = ""
+			dp.CommitMessageError = nil
+			dp.ShowCommitMessage = true
+			dp.CopiedToClipboard = false
+			return dp, dp.RequestCommitMessage()
+		}
+		return dp, nil
+
+	case "esc", "q":
+		// Close commit message panel if shown
+		if dp.ShowCommitMessage {
+			dp.ShowCommitMessage = false
+			dp.CopiedToClipboard = false
+			dp.ClipboardError = ""
+			return dp, nil
+		}
+
+	case "y", "Y":
+		// Copy commit message to clipboard
+		if dp.ShowCommitMessage && dp.CommitMessage != "" && !dp.GeneratingCommitMsg {
+			err := copyToClipboard(dp.CommitMessage)
+			if err == nil {
+				dp.CopiedToClipboard = true
+				dp.ClipboardError = ""
+			} else {
+				dp.CopiedToClipboard = false
+				dp.ClipboardError = err.Error()
+			}
+			return dp, nil
+		}
 	}
 
 	if dp.Focus == DiffFocusFileList {
@@ -527,12 +569,80 @@ func (dp *DiffPanel) View() string {
 	// Build content panel
 	content := dp.renderContent(contentWidth)
 
-	// Join sidebar and content horizontally
-	return lipgloss.JoinHorizontal(
+	// Main diff view
+	mainView := lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		sidebar,
 		content,
 	)
+
+	// If showing commit message panel, overlay it
+	if dp.ShowCommitMessage {
+		commitPanel := dp.renderCommitMessagePanel()
+		return lipgloss.JoinVertical(lipgloss.Left, mainView, commitPanel)
+	}
+
+	return mainView
+}
+
+// renderCommitMessagePanel renders the commit message generation panel
+func (dp *DiffPanel) renderCommitMessagePanel() string {
+	var b strings.Builder
+
+	// Header
+	title := "🤖 AI Commit Message"
+	if dp.GeneratingCommitMsg {
+		title += " (generating...)"
+	}
+	b.WriteString(dp.Styles.ModalTitle.Render(title))
+	b.WriteString("\n")
+
+	divider := strings.Repeat("─", dp.Width-10)
+	b.WriteString(dp.Styles.Divider.Render(divider))
+	b.WriteString("\n")
+
+	// Content
+	if dp.GeneratingCommitMsg {
+		b.WriteString(dp.Styles.Help.Render("⏳ Analyzing changes and generating commit message..."))
+	} else if dp.CommitMessageError != nil {
+		b.WriteString(dp.Styles.Error.Render(fmt.Sprintf("❌ Error: %v", dp.CommitMessageError)))
+	} else if dp.CommitMessage != "" {
+		// Show the generated commit message
+		statusText := "✅ Generated commit message:"
+		if dp.CopiedToClipboard {
+			statusText = "✅ Generated commit message (📋 Copied!):"
+		} else if dp.ClipboardError != "" {
+			statusText = "✅ Generated (⚠️ Copy failed: " + dp.ClipboardError + "):"
+		}
+		b.WriteString(dp.Styles.Success.Render(statusText))
+		b.WriteString("\n\n")
+		// Style the commit message nicely
+		msgStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#e6edf3")).
+			Background(lipgloss.Color("#21262d")).
+			Padding(1, 2).
+			Width(dp.Width - 14)
+		b.WriteString(msgStyle.Render(dp.CommitMessage))
+	} else {
+		b.WriteString(dp.Styles.Help.Render("Press 'c' to generate a commit message"))
+	}
+
+	b.WriteString("\n")
+	b.WriteString(dp.Styles.Divider.Render(divider))
+	b.WriteString("\n")
+
+	// Footer
+	footer := dp.Styles.Help.Render("q/Esc: close · c: regenerate · y: copy")
+	b.WriteString(footer)
+
+	// Apply panel style
+	panelStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(dp.Styles.Theme.BorderFocused).
+		Padding(0, 1).
+		Width(dp.Width - 4)
+
+	return panelStyle.Render(b.String())
 }
 
 // renderFileList renders the file list sidebar
@@ -738,7 +848,7 @@ func (dp *DiffPanel) renderContent(width int) string {
 	fileStats := dp.Styles.Success.Render(fmt.Sprintf("+%d", file.AddedCount)) + " " +
 		dp.Styles.Error.Render(fmt.Sprintf("-%d", file.RemovedCount))
 	position := fmt.Sprintf("Line %d/%d", dp.CursorLine+1, len(file.Lines))
-	footer := dp.Styles.Help.Render("j/k: scroll · n/N: hunk · ←: files · Tab: staged")
+	footer := dp.Styles.Help.Render("j/k: scroll · n/N: hunk · ←: files · Tab: staged · c: commit msg")
 
 	b.WriteString(fileStats + " │ " + dp.Styles.Help.Render(position) + " │ " + footer)
 
@@ -846,4 +956,80 @@ func (dp *DiffPanel) HasChanges() bool {
 // GetFileCount returns the number of files in the diff
 func (dp *DiffPanel) GetFileCount() int {
 	return len(dp.Files)
+}
+
+// GetDiffSummary returns a summary of changes suitable for AI commit message generation
+func (dp *DiffPanel) GetDiffSummary() string {
+	var summary strings.Builder
+	summary.WriteString("Changes summary:\n")
+
+	for _, file := range dp.Files {
+		status := "modified"
+		if file.IsNew {
+			status = "added"
+		} else if file.IsDeleted {
+			status = "deleted"
+		}
+
+		path := file.NewPath
+		if path == "" {
+			path = file.OldPath
+		}
+		summary.WriteString(fmt.Sprintf("- %s (%s): +%d -%d lines\n", path, status, file.AddedCount, file.RemovedCount))
+	}
+
+	return summary.String()
+}
+
+// RequestCommitMessage creates a command to request AI commit message generation
+func (dp *DiffPanel) RequestCommitMessage() tea.Cmd {
+	added, removed := dp.countTotalChanges()
+	diffContent := dp.RawDiff
+
+	// Limit diff content to avoid overwhelming the AI
+	maxDiffLen := 8000
+	if len(diffContent) > maxDiffLen {
+		diffContent = diffContent[:maxDiffLen] + "\n... (diff truncated)"
+	}
+
+	return func() tea.Msg {
+		return CommitMessageRequestMsg{
+			DiffContent:  diffContent,
+			FilesChanged: len(dp.Files),
+			Additions:    added,
+			Deletions:    removed,
+		}
+	}
+}
+
+// SetCommitMessage sets the generated commit message
+func (dp *DiffPanel) SetCommitMessage(msg string, err error) {
+	dp.GeneratingCommitMsg = false
+	dp.CommitMessage = msg
+	dp.CommitMessageError = err
+}
+
+// copyToClipboard copies text to clipboard using system tools
+func copyToClipboard(text string) error {
+	// Try different clipboard commands in order of preference
+	clipboardCmds := []struct {
+		name string
+		args []string
+	}{
+		{"xclip", []string{"-selection", "clipboard"}},
+		{"xsel", []string{"--clipboard", "--input"}},
+		{"wl-copy", []string{}}, // Wayland
+	}
+
+	for _, c := range clipboardCmds {
+		if _, err := exec.LookPath(c.name); err == nil {
+			cmd := exec.Command(c.name, c.args...)
+			cmd.Stdin = strings.NewReader(text)
+			if err := cmd.Run(); err == nil {
+				return nil
+			}
+		}
+	}
+
+	return fmt.Errorf("no clipboard tool found (install xclip, xsel, or wl-copy)")
 }
