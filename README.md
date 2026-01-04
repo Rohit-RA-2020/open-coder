@@ -157,13 +157,28 @@ The `/diff` command opens a VS Code-style split-pane diff viewer:
 | `j` / `k` | Scroll up/down |
 | `n` / `N` | Jump to next/prev hunk |
 | `Tab` | Toggle staged/unstaged |
-| `Esc` | Close diff view |
+| `c` | Generate AI commit message |
+| `Esc` / `q` | Close diff view |
 
 The file sidebar shows:
 - `A` (green) - Added files
 - `M` (yellow) - Modified files
 - `D` (red) - Deleted files
 - Change counts (+X -Y) per file
+
+#### AI Commit Message Generation
+
+Press `c` in the diff view to generate an AI-powered commit message based on your changes:
+
+| Key | Action |
+|-----|--------|
+| `c` | Generate/regenerate commit message |
+| `y` | Copy commit message to clipboard |
+| `q` / `Esc` | Close commit message panel |
+
+The AI analyzes your diff (files changed, additions, deletions) and generates a commit message following conventional commit format (feat:, fix:, refactor:, etc.).
+
+> **Note:** Clipboard copy requires `xclip`, `xsel`, or `wl-copy` (Wayland) to be installed on Linux.
 
 ### Codebase Indexing
 
