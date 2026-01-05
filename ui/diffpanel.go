@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -297,9 +298,12 @@ func (dp *DiffPanel) updateHunkIndices() {
 	}
 }
 
-// FetchDiff runs git diff and parses the result
+// FetchDiff runs git diff and parses the result, including untracked files
 func FetchDiff(staged bool, path string) tea.Cmd {
 	return func() tea.Msg {
+		var combinedDiff strings.Builder
+
+		// Fetch regular git diff (modified/staged files)
 		args := []string{"diff", "--no-color"}
 		if staged {
 			args = append(args, "--cached")
@@ -310,13 +314,104 @@ func FetchDiff(staged bool, path string) tea.Cmd {
 
 		cmd := exec.Command("git", args...)
 		output, err := cmd.Output()
+		if err == nil {
+			combinedDiff.WriteString(string(output))
+		}
+
+		// For unstaged mode, also fetch untracked files
+		if !staged && path == "" {
+			untrackedDiff := fetchUntrackedFiles()
+			if untrackedDiff != "" {
+				if combinedDiff.Len() > 0 {
+					combinedDiff.WriteString("\n")
+				}
+				combinedDiff.WriteString(untrackedDiff)
+			}
+		}
 
 		return GitDiffResultMsg{
-			Diff:   string(output),
+			Diff:   combinedDiff.String(),
 			Error:  err,
 			Staged: staged,
 		}
 	}
+}
+
+// fetchUntrackedFiles gets untracked files and creates synthetic diffs for them
+func fetchUntrackedFiles() string {
+	// Get list of untracked files
+	cmd := exec.Command("git", "ls-files", "--others", "--exclude-standard")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	files := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(files) == 0 || (len(files) == 1 && files[0] == "") {
+		return ""
+	}
+
+	var result strings.Builder
+	for _, file := range files {
+		if file == "" {
+			continue
+		}
+
+		// Read file content
+		content, err := os.ReadFile(file)
+		if err != nil {
+			continue
+		}
+
+		// Check if it's a binary file (simple heuristic)
+		if isBinaryContent(content) {
+			// Create a simple binary file diff header
+			result.WriteString(fmt.Sprintf("diff --git a/%s b/%s\n", file, file))
+			result.WriteString("new file mode 100644\n")
+			fmt.Fprintf(&result, "--- /dev/null\n")
+			result.WriteString(fmt.Sprintf("+++ b/%s\n", file))
+			result.WriteString("Binary file\n")
+			continue
+		}
+
+		// Create synthetic diff for text file (all lines as added)
+		lines := strings.Split(string(content), "\n")
+		lineCount := len(lines)
+		if lineCount > 0 && lines[lineCount-1] == "" {
+			lineCount-- // Don't count trailing empty line
+		}
+
+		result.WriteString(fmt.Sprintf("diff --git a/%s b/%s\n", file, file))
+		result.WriteString("new file mode 100644\n")
+		fmt.Fprintf(&result, "--- /dev/null\n")
+		result.WriteString(fmt.Sprintf("+++ b/%s\n", file))
+		result.WriteString(fmt.Sprintf("@@ -0,0 +1,%d @@\n", lineCount))
+
+		// Add all lines as additions (green)
+		for i, line := range lines {
+			if i == len(lines)-1 && line == "" {
+				continue // Skip trailing empty line
+			}
+			result.WriteString("+" + line + "\n")
+		}
+	}
+
+	return result.String()
+}
+
+// isBinaryContent checks if content appears to be binary
+func isBinaryContent(content []byte) bool {
+	// Check for null bytes in the first 8000 bytes
+	checkLen := len(content)
+	if checkLen > 8000 {
+		checkLen = 8000
+	}
+	for i := 0; i < checkLen; i++ {
+		if content[i] == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Update handles input for diff panel
