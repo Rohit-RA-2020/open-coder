@@ -12,6 +12,7 @@ require (
 	github.com/mark3labs/mcp-go v0.42.0
 	github.com/modelcontextprotocol/go-sdk v1.0.0
 	github.com/openai/openai-go/v3 v3.6.1
+	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/qdrant/go-client v1.15.2
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 )

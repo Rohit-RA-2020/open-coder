@@ -4,6 +4,26 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// CommandInfo represents a command with its description for autocomplete
+type CommandInfo struct {
+	Command     string
+	Description string
+}
+
+// AvailableCommands returns all available commands for autocomplete
+func AvailableCommands() []CommandInfo {
+	return []CommandInfo{
+		{Command: "/help", Description: "Show help screen"},
+		{Command: "/settings", Description: "Open settings panel"},
+		{Command: "/clear", Description: "Clear chat history"},
+		{Command: "/new", Description: "Start new conversation"},
+		{Command: "/theme", Description: "Toggle dark/light theme"},
+		{Command: "/index", Description: "Index current codebase"},
+		{Command: "/diff", Description: "Show git diff (unstaged)"},
+		{Command: "/diff --staged", Description: "Show staged changes"},
+	}
+}
+
 // Message types for async operations
 
 // StreamChunkMsg is sent when a new chunk arrives from OpenAI streaming
@@ -214,6 +234,14 @@ type WindowSizeMsg struct {
 
 // TickMsg is for animations and periodic updates
 type TickMsg struct{}
+
+// TokenStatsUpdatedMsg contains updated token statistics
+type TokenStatsUpdatedMsg struct {
+	InputTokens        int     // Total input tokens sent
+	OutputTokens       int     // Total output tokens received
+	TotalContextTokens int     // Current context window size
+	AvgTokensPerSecond float64 // Average tokens/second across all responses
+}
 
 // SendMessageCmd creates a command to process user input
 func SendMessageCmd(message string) tea.Cmd {

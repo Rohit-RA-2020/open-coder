@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	tiktoken "github.com/pkoukk/tiktoken-go"
 
 	"open-coder/pkg/indexer"
 )
@@ -43,6 +45,13 @@ type Agent struct {
 
 	// Program reference for sending messages
 	program *tea.Program
+
+	// Token tracking
+	tokenEncoder      *tiktoken.Tiktoken
+	inputTokens       int
+	outputTokens      int
+	totalResponseTime time.Duration
+	responseCount     int
 }
 
 // MCPServer represents a connected MCP server
@@ -62,6 +71,13 @@ func NewAgent(ctx context.Context, model, apiKey, baseURL string) *Agent {
 		option.WithBaseURL(baseURL),
 	)
 
+	// Initialize tiktoken encoder for token counting
+	tke, err := tiktoken.EncodingForModel(model)
+	if err != nil || tke == nil {
+		// Fall back to cl100k_base for unknown models (covers GPT-4, Claude, etc.)
+		tke, _ = tiktoken.GetEncoding("cl100k_base")
+	}
+
 	return &Agent{
 		ctx:                     ctx,
 		cancel:                  cancel,
@@ -74,6 +90,7 @@ func NewAgent(ctx context.Context, model, apiKey, baseURL string) *Agent {
 		tools:                   make([]openai.ChatCompletionToolUnionParam, 0),
 		messages:                make([]openai.ChatCompletionMessageParamUnion, 0),
 		requireTerminalApproval: true,
+		tokenEncoder:            tke,
 	}
 }
 
@@ -97,6 +114,11 @@ func (a *Agent) ClearConversation() {
 	a.messages = []openai.ChatCompletionMessageParamUnion{
 		openai.SystemMessage(a.systemPrompt),
 	}
+	// Reset token stats
+	a.inputTokens = 0
+	a.outputTokens = 0
+	a.totalResponseTime = 0
+	a.responseCount = 0
 }
 
 // AddMCPServer connects to an MCP server
@@ -197,6 +219,25 @@ func (a *Agent) GetToolCount() int {
 	return len(a.tools)
 }
 
+// countTokens counts tokens for a given text using tiktoken
+func (a *Agent) countTokens(text string) int {
+	if a.tokenEncoder == nil {
+		return 0
+	}
+	return len(a.tokenEncoder.Encode(text, nil, nil))
+}
+
+// GetTokenStats returns current token statistics
+func (a *Agent) GetTokenStats() (input, output, context int, avgTPS float64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.responseCount > 0 && a.totalResponseTime.Seconds() > 0 {
+		avgTPS = float64(a.outputTokens) / a.totalResponseTime.Seconds()
+	}
+	return a.inputTokens, a.outputTokens, a.inputTokens + a.outputTokens, avgTPS
+}
+
 // IsTerminalApprovalRequired returns whether terminal approval is required
 func (a *Agent) IsTerminalApprovalRequired() bool {
 	return a.requireTerminalApproval
@@ -220,6 +261,12 @@ func (a *Agent) CancelCurrentTool() {
 // ProcessMessage implements AgentInterface - processes user input and returns a command
 func (a *Agent) ProcessMessage(content string) tea.Cmd {
 	return func() tea.Msg {
+		// Count input tokens
+		tokens := a.countTokens(content)
+		a.mu.Lock()
+		a.inputTokens += tokens
+		a.mu.Unlock()
+
 		a.messages = append(a.messages, openai.UserMessage(content))
 		return a.processConversation()
 	}
@@ -227,6 +274,9 @@ func (a *Agent) ProcessMessage(content string) tea.Cmd {
 
 // processConversation handles the conversation loop with streaming
 func (a *Agent) processConversation() tea.Msg {
+	responseStart := time.Now()
+	var currentOutputTokens int
+
 	for {
 		// Create streaming request
 		stream := a.openaiClient.Chat.Completions.NewStreaming(a.ctx, openai.ChatCompletionNewParams{
@@ -243,11 +293,14 @@ func (a *Agent) processConversation() tea.Msg {
 			current := stream.Current()
 			acc.AddChunk(current)
 
-			// Send content chunks to UI
+			// Send content chunks to UI and count output tokens
 			if len(current.Choices) > 0 && current.Choices[0].Delta.Content != "" {
+				chunkContent := current.Choices[0].Delta.Content
+				currentOutputTokens += a.countTokens(chunkContent)
+
 				if a.program != nil {
 					a.program.Send(StreamChunkMsg{
-						Content: current.Choices[0].Delta.Content,
+						Content: chunkContent,
 						Done:    false,
 					})
 				}
@@ -256,6 +309,25 @@ func (a *Agent) processConversation() tea.Msg {
 
 		if err := stream.Err(); err != nil {
 			return StreamErrorMsg{Err: err}
+		}
+
+		// Update token stats after streaming completes
+		responseDuration := time.Since(responseStart)
+		a.mu.Lock()
+		a.outputTokens += currentOutputTokens
+		a.totalResponseTime += responseDuration
+		a.responseCount++
+		a.mu.Unlock()
+
+		// Send token stats update to UI
+		if a.program != nil {
+			input, output, ctx, avgTPS := a.GetTokenStats()
+			a.program.Send(TokenStatsUpdatedMsg{
+				InputTokens:        input,
+				OutputTokens:       output,
+				TotalContextTokens: ctx,
+				AvgTokensPerSecond: avgTPS,
+			})
 		}
 
 		// Check for tool calls
@@ -285,7 +357,9 @@ func (a *Agent) processConversation() tea.Msg {
 				}
 			}
 
-			// Continue the loop to get the next response
+			// Reset for next iteration and continue the loop
+			responseStart = time.Now()
+			currentOutputTokens = 0
 			continue
 		}
 

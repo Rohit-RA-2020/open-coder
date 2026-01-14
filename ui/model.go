@@ -69,6 +69,16 @@ type Model struct {
 
 	// Diff panel state
 	diffPanel *DiffPanel
+
+	// Token stats
+	inputTokens        int
+	outputTokens       int
+	totalContextTokens int
+	avgTokensPerSecond float64
+
+	// Command autocomplete state
+	showCommandMenu   bool // Whether command dropdown is visible
+	commandMenuCursor int  // Currently selected command index
 }
 
 // AgentInterface defines the backend operations the UI needs
@@ -375,6 +385,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffPanel.SetCommitMessage(msg.Message, msg.Error)
 		}
 		return m, nil
+
+	case TokenStatsUpdatedMsg:
+		// Update token stats display
+		m.inputTokens = msg.InputTokens
+		m.outputTokens = msg.OutputTokens
+		m.totalContextTokens = msg.TotalContextTokens
+		m.avgTokensPerSecond = msg.AvgTokensPerSecond
+		return m, nil
 	}
 
 	// Update textarea
@@ -419,11 +437,59 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlQ:
 		return m, tea.Quit
 
+	case tea.KeyEsc:
+		// Close command menu if open
+		if m.showCommandMenu {
+			m.showCommandMenu = false
+			return m, nil
+		}
+
+	case tea.KeyUp:
+		// Navigate command menu
+		if m.showCommandMenu {
+			filtered := m.getFilteredCommands()
+			if len(filtered) > 0 {
+				m.commandMenuCursor--
+				if m.commandMenuCursor < 0 {
+					m.commandMenuCursor = len(filtered) - 1
+				}
+			}
+			return m, nil
+		}
+
+	case tea.KeyDown:
+		// Navigate command menu
+		if m.showCommandMenu {
+			filtered := m.getFilteredCommands()
+			if len(filtered) > 0 {
+				m.commandMenuCursor++
+				if m.commandMenuCursor >= len(filtered) {
+					m.commandMenuCursor = 0
+				}
+			}
+			return m, nil
+		}
+
 	case tea.KeyEnter:
+		// Select from command menu
+		if m.showCommandMenu {
+			filtered := m.getFilteredCommands()
+			if len(filtered) > 0 && m.commandMenuCursor < len(filtered) {
+				command := filtered[m.commandMenuCursor].Command
+				m.textarea.Reset()
+				m.showCommandMenu = false
+				m.commandMenuCursor = 0
+				newView, cmd := m.handleCommand(command)
+				m.view = newView
+				return m, cmd
+			}
+		}
+		// Normal message submission
 		if m.view == ViewChat && !m.isProcessing && m.panelFocus == PanelChat {
 			content := strings.TrimSpace(m.textarea.Value())
 			if content != "" {
 				m.textarea.Reset()
+				m.showCommandMenu = false
 				newView, cmd := m.handleCommand(content)
 				m.view = newView
 				return m, cmd
@@ -456,6 +522,16 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyTab:
+		// Autocomplete from command menu if open
+		if m.showCommandMenu {
+			filtered := m.getFilteredCommands()
+			if len(filtered) > 0 && m.commandMenuCursor < len(filtered) {
+				m.textarea.SetValue(filtered[m.commandMenuCursor].Command + " ")
+				m.showCommandMenu = false
+				m.commandMenuCursor = 0
+			}
+			return m, nil
+		}
 		// Switch panel focus
 		m.panelFocus++
 		if m.panelFocus > PanelCode {
@@ -509,12 +585,14 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Handle textarea input
 		var cmd tea.Cmd
 		m.textarea, cmd = m.textarea.Update(msg)
+		m.updateCommandMenu()
 		return m, cmd
 	}
 
 	// Default: handle textarea
 	var cmd tea.Cmd
 	m.textarea, cmd = m.textarea.Update(msg)
+	m.updateCommandMenu()
 	return m, cmd
 }
 
@@ -633,6 +711,40 @@ func (m *Model) applyAccentColor() tea.Cmd {
 	m.styles = NewStyles(m.styles.Theme)
 
 	return nil
+}
+
+// getFilteredCommands returns commands that match the current input
+func (m *Model) getFilteredCommands() []CommandInfo {
+	input := strings.TrimSpace(m.textarea.Value())
+	if !strings.HasPrefix(input, "/") {
+		return []CommandInfo{}
+	}
+
+	var filtered []CommandInfo
+	for _, cmd := range AvailableCommands() {
+		if strings.HasPrefix(strings.ToLower(cmd.Command), strings.ToLower(input)) {
+			filtered = append(filtered, cmd)
+		}
+	}
+	return filtered
+}
+
+// updateCommandMenu updates the command menu visibility based on input
+func (m *Model) updateCommandMenu() {
+	input := strings.TrimSpace(m.textarea.Value())
+
+	// Show menu when input starts with /
+	if strings.HasPrefix(input, "/") && len(input) >= 1 {
+		m.showCommandMenu = true
+		// Reset cursor if filtered list changed
+		filtered := m.getFilteredCommands()
+		if m.commandMenuCursor >= len(filtered) {
+			m.commandMenuCursor = 0
+		}
+	} else {
+		m.showCommandMenu = false
+		m.commandMenuCursor = 0
+	}
 }
 
 // handleCommand processes special commands
@@ -931,6 +1043,12 @@ func (m Model) renderChat() string {
 		middleSection = chatView
 	}
 
+	// Command autocomplete dropdown
+	var commandMenu string
+	if m.showCommandMenu {
+		commandMenu = m.renderCommandMenu()
+	}
+
 	// Input area - highlight when chat is focused
 	inputStyle := m.styles.InputContainer
 	if m.panelFocus == PanelChat {
@@ -944,6 +1062,16 @@ func (m Model) renderChat() string {
 	statusBar := m.renderStatusBar()
 
 	// Combine all elements
+	if commandMenu != "" {
+		return lipgloss.JoinVertical(
+			lipgloss.Left,
+			header,
+			middleSection,
+			commandMenu,
+			inputBox,
+			statusBar,
+		)
+	}
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		header,
@@ -961,6 +1089,38 @@ func headerHeight() int {
 // inputHeight returns the height of the input area
 func inputHeight() int {
 	return 5
+}
+
+// renderCommandMenu renders the command autocomplete dropdown
+func (m Model) renderCommandMenu() string {
+	filtered := m.getFilteredCommands()
+	if len(filtered) == 0 {
+		return ""
+	}
+
+	var content strings.Builder
+	content.WriteString(m.styles.Help.Render("Commands") + "\n")
+
+	for i, cmd := range filtered {
+		prefix := "  "
+		style := m.styles.FilePickerItem
+		if i == m.commandMenuCursor {
+			prefix = "▸ "
+			style = m.styles.FilePickerSelected
+		}
+		line := fmt.Sprintf("%s%s  %s", prefix, cmd.Command, m.styles.Help.Render(cmd.Description))
+		content.WriteString(style.Render(line) + "\n")
+	}
+
+	content.WriteString(m.styles.Help.Render("↑↓ navigate · Enter select · Tab complete · Esc close"))
+
+	menuStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.styles.Theme.Primary).
+		Padding(0, 1).
+		Width(m.width - 6)
+
+	return menuStyle.Render(content.String())
 }
 
 // renderHeader renders the top header bar
@@ -1004,22 +1164,29 @@ func (m Model) renderStatusBar() string {
 	case PanelCode:
 		focusLabel = "Code"
 	}
-	items = append(items, m.styles.StatusItem.Render(
-		fmt.Sprintf("📌 %s", focusLabel),
-	))
+	items = append(items, m.styles.StatusItem.Render(focusLabel))
 
 	// Server status
 	if m.serverCount > 0 {
 		items = append(items, m.styles.StatusItem.Render(
-			fmt.Sprintf("⚡ %d servers", m.serverCount),
+			fmt.Sprintf("%d servers", m.serverCount),
 		))
 	}
 
 	// Tool count
 	if m.toolCount > 0 {
 		items = append(items, m.styles.StatusItem.Render(
-			fmt.Sprintf("🔧 %d tools", m.toolCount),
+			fmt.Sprintf("%d tools", m.toolCount),
 		))
+	}
+
+	// Token stats (show if any tokens have been used)
+	if m.inputTokens > 0 || m.outputTokens > 0 {
+		tokenInfo := fmt.Sprintf("In:%d Out:%d Ctx:%d", m.inputTokens, m.outputTokens, m.totalContextTokens)
+		if m.avgTokensPerSecond > 0 {
+			tokenInfo += fmt.Sprintf(" %.1f tok/s", m.avgTokensPerSecond)
+		}
+		items = append(items, m.styles.StatusItem.Render(tokenInfo))
 	}
 
 	// Processing indicator
@@ -1196,12 +1363,12 @@ func (m Model) renderSettings() string {
 func (m Model) renderWelcome() string {
 	// ASCII art logo
 	logo := `
-   ___  ____  ____  _  __     _____ ___  ____  _____ ____  
-  / _ \|  _ \| ___|| |/ /    / ____/ _ \|  _ \| ____|  _ \ 
- | | | | |_) |  _| |   /____| |   | | | | | | |  _| | |_) |
- | |_| |  __/| |___| . \____| |___| |_| | |_| | |___|  _ < 
-  \___/|_|   |_____|_|\_\    \____|\___/|____/|_____|_| \_\
-                                                           
+   ___  ____  _____ _   _        _____ ____  ____  _____ ____  
+  / _ \|  _ \| ____| \ | |      / ____/ __ \|  _ \| ____|  _ \ 
+ | | | | |_) |  _| |  \| |_____| |   | |  | | | | |  _| | |_) |
+ | |_| |  __/| |___| |\  |_____| |___| |__| | |_| | |___|  _ < 
+  \___/|_|   |_____|_| \_|      \____|\____/|____/|_____|_| \_\
+                                                               
 `
 	// Get current working directory
 	wd, _ := os.Getwd()
@@ -1254,19 +1421,36 @@ func (m Model) renderWelcome() string {
 		Align(lipgloss.Center).
 		Render(content.String())
 
+	// Command autocomplete dropdown for welcome screen
+	var commandMenu string
+	if m.showCommandMenu {
+		commandMenu = m.renderCommandMenu()
+	}
+
 	// Input area
 	inputBox := m.styles.InputContainer.
 		Width(70).
 		BorderForeground(m.styles.Theme.BorderFocused).
 		Render(m.styles.InputPrompt.Render("▸ ") + m.textarea.View())
 
-	// Combine logo and input
-	combined := lipgloss.JoinVertical(
-		lipgloss.Center,
-		contentBox,
-		"",
-		inputBox,
-	)
+	// Combine logo, command menu (if shown), and input
+	var combined string
+	if commandMenu != "" {
+		combined = lipgloss.JoinVertical(
+			lipgloss.Center,
+			contentBox,
+			"",
+			commandMenu,
+			inputBox,
+		)
+	} else {
+		combined = lipgloss.JoinVertical(
+			lipgloss.Center,
+			contentBox,
+			"",
+			inputBox,
+		)
+	}
 
 	// Center everything on screen
 	return lipgloss.Place(
