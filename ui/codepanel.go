@@ -36,8 +36,8 @@ func NewCodePanel(styles Styles) *CodePanel {
 		CursorLine: 1,
 		Offset:     0,
 		Styles:     styles,
-		Width:      60,
-		Height:     20,
+		Width:      80, // Increased for better readability
+		Height:     30, // Increased for more visible content
 	}
 }
 
@@ -311,7 +311,7 @@ func (cp *CodePanel) View() string {
 		}
 
 		// Wrap or truncate line content to fit width
-		maxLineWidth := cp.Width - 12 // Account for line number and padding
+		maxLineWidth := cp.Width - 9 // Account for line number and separator
 		if maxLineWidth > 0 && len(lineContent) > maxLineWidth {
 			// Truncate with ellipsis for code panel (wrapping would break code)
 			lineContent = lineContent[:maxLineWidth-1] + "…"

@@ -248,12 +248,11 @@ func NewStyles(theme Theme) Styles {
 		MarginTop(1).
 		MarginBottom(1)
 
-	// Input area - fixed at bottom
+	// Input area - fixed at bottom (no background to avoid weird patches)
 	s.InputContainer = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(theme.Border).
-		Padding(0, 1).
-		Background(theme.InputBg)
+		Padding(0, 1)
 
 	s.InputField = lipgloss.NewStyle().
 		Foreground(theme.InputText)

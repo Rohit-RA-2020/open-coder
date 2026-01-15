@@ -496,17 +496,6 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case tea.KeyCtrlT:
-		// Toggle theme
-		if m.isDarkTheme {
-			m.styles = NewStyles(LightTheme)
-			m.isDarkTheme = false
-		} else {
-			m.styles = NewStyles(DarkTheme)
-			m.isDarkTheme = true
-		}
-		return m, nil
-
 	case tea.KeyCtrlL:
 		// Clear chat
 		m.messages = []ChatMessage{}
@@ -767,12 +756,6 @@ func (m Model) handleCommand(content string) (ViewState, tea.Cmd) {
 		m.updateViewport()
 		return ViewChat, nil
 
-	case lower == "/theme" || lower == "/toggle-theme":
-		if m.isDarkTheme {
-			return ViewChat, func() tea.Msg { return ThemeChangedMsg{Theme: LightTheme} }
-		}
-		return ViewChat, func() tea.Msg { return ThemeChangedMsg{Theme: DarkTheme} }
-
 	case lower == "/index":
 		if m.agent != nil {
 			return ViewChat, m.agent.IndexCodebase()
@@ -803,14 +786,16 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.width = msg.Width
 	m.height = msg.Height
 
-	headerHeight := 2
-	statusHeight := 1
-	inputHeight := 5
-	chatHeight := m.height - headerHeight - statusHeight - inputHeight
+	// Use consistent height calculation with renderChat
+	// Account for: header (2) + input area (5) + status bar (1) + panel borders (4)
+	chatHeight := m.height - headerHeight() - inputHeight() - 1 - 4
+	if chatHeight < 10 {
+		chatHeight = 10
+	}
 
 	if !m.ready {
 		m.viewport = viewport.New(m.width, chatHeight)
-		m.viewport.YPosition = headerHeight
+		m.viewport.YPosition = headerHeight()
 		m.ready = true
 	} else {
 		m.viewport.Width = m.width
@@ -880,7 +865,15 @@ func (m *Model) renderMessage(msg ChatMessage) string {
 	switch msg.Role {
 	case RoleUser:
 		label = m.styles.MessageLabel.Foreground(m.styles.Theme.UserMessage).Render("You ▸")
-		content = m.styles.MessageUser.Width(maxWidth).Render(msg.Content)
+		// User messages get a subtle left border to stand out (theme-aware)
+		userStyle := lipgloss.NewStyle().
+			Foreground(m.styles.Theme.UserMessage).
+			BorderLeft(true).
+			BorderStyle(lipgloss.ThickBorder()).
+			BorderForeground(m.styles.Theme.Primary).
+			PaddingLeft(1).
+			Width(maxWidth)
+		content = userStyle.Render(msg.Content)
 
 	case RoleAssistant:
 		label = m.styles.MessageLabel.Foreground(m.styles.Theme.AssistantMessage).Render("Assistant ▸")
@@ -963,60 +956,80 @@ func (m Model) renderChat() string {
 	// Header
 	header := m.renderHeader()
 
-	// Calculate layout dimensions
-	sidebarWidth := 30
+	// Calculate available content height (accounting for header, input, status, borders)
+	contentHeight := m.height - headerHeight() - inputHeight() - 1 - 4
+	if contentHeight < 10 {
+		contentHeight = 10
+	}
+
+	// Calculate layout dimensions with better proportions
+	// Sidebar: ~20% of width (min 25, max 35)
+	sidebarWidth := m.width / 5
+	if sidebarWidth < 25 {
+		sidebarWidth = 25
+	}
+	if sidebarWidth > 35 {
+		sidebarWidth = 35
+	}
 	if !m.showSidebar {
 		sidebarWidth = 0
 	}
 
-	codePanelWidth := 40
+	// Code panel: ~35% of width (min 50 for readability)
+	codePanelWidth := m.width * 35 / 100
+	if codePanelWidth < 50 {
+		codePanelWidth = 50
+	}
 	if !m.showCodePanel {
 		codePanelWidth = 0
 	}
 
+	// Chat takes remaining space (minimum 45 chars for readability)
 	chatWidth := m.width - sidebarWidth - codePanelWidth - 4
-	if chatWidth < 40 {
-		chatWidth = 40
-		codePanelWidth = m.width - sidebarWidth - 44
-		if codePanelWidth < 30 {
-			codePanelWidth = 0
+	if chatWidth < 45 {
+		// If chat is too small, reduce code panel first
+		neededSpace := 45 - chatWidth
+		codePanelWidth -= neededSpace
+		if codePanelWidth < 40 {
+			codePanelWidth = 0 // Hide code panel if too cramped
 		}
+		chatWidth = m.width - sidebarWidth - codePanelWidth - 4
 	}
 
 	// Build sidebar (file tree)
 	var sidebar string
 	if m.showSidebar && m.fileTree != nil {
 		m.fileTree.Width = sidebarWidth - 2
-		m.fileTree.Height = m.height - headerHeight() - inputHeight() - 4
+		m.fileTree.Height = contentHeight
 		sidebarStyle := m.styles.SidebarPanel
 		if m.panelFocus == PanelFileTree {
 			sidebarStyle = sidebarStyle.BorderForeground(m.styles.Theme.BorderFocused)
 		}
-		sidebar = sidebarStyle.Width(sidebarWidth).MaxHeight(m.height - headerHeight() - inputHeight() - 2).Render(
+		sidebar = sidebarStyle.Width(sidebarWidth).Height(contentHeight + 2).Render(
 			m.styles.SidebarTitle.Render("📁 Files") + "\n" + m.fileTree.View(),
 		)
 	}
 
-	// Build code panel
+	// Build code panel with proper sizing
 	var codePanelStr string
-	if m.showCodePanel && m.codePanel != nil {
+	if m.showCodePanel && m.codePanel != nil && codePanelWidth > 0 {
 		m.codePanel.Width = codePanelWidth - 2
-		m.codePanel.Height = m.height - headerHeight() - inputHeight() - 4
+		m.codePanel.Height = contentHeight
 		codePanelStyle := m.styles.CodePanel
 		if m.panelFocus == PanelCode {
 			codePanelStyle = codePanelStyle.BorderForeground(m.styles.Theme.BorderFocused)
 		}
-		codePanelStr = codePanelStyle.Width(codePanelWidth).MaxHeight(m.height - headerHeight() - inputHeight() - 2).Render(m.codePanel.View())
+		codePanelStr = codePanelStyle.Width(codePanelWidth).Height(contentHeight + 2).Render(m.codePanel.View())
 	}
 
-	// Chat viewport
-	m.viewport.Width = chatWidth
-	m.viewport.Height = m.height - headerHeight() - inputHeight() - 4
+	// Chat viewport - use consistent height calculation
+	m.viewport.Width = chatWidth - 2 // Account for border
+	m.viewport.Height = contentHeight
 	chatViewStyle := m.styles.PanelBorder
 	if m.panelFocus == PanelChat {
 		chatViewStyle = m.styles.PanelBorderFocus
 	}
-	chatView := chatViewStyle.Width(chatWidth).MaxHeight(m.height - headerHeight() - inputHeight() - 2).Render(m.viewport.View())
+	chatView := chatViewStyle.Width(chatWidth).Height(contentHeight + 2).Render(m.viewport.View())
 
 	// Combine middle section (sidebar, chat, code panel)
 	middleSection := ""
@@ -1134,19 +1147,13 @@ func (m Model) renderHeader() string {
 
 	left := lipgloss.JoinHorizontal(lipgloss.Center, title, info)
 
-	themeIcon := "🌙"
-	if !m.isDarkTheme {
-		themeIcon = "☀️"
-	}
-	right := m.styles.HeaderInfo.Render(themeIcon)
-
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 4
+	gap := m.width - lipgloss.Width(left) - 4
 	if gap < 0 {
 		gap = 0
 	}
 
 	return m.styles.Header.Width(m.width).Render(
-		left + strings.Repeat(" ", gap) + right,
+		left + strings.Repeat(" ", gap),
 	)
 }
 
@@ -1217,7 +1224,6 @@ func (m Model) renderHelp() string {
 | F3 | Toggle git diff view |
 | Ctrl+C | Cancel current tool / Quit |
 | Ctrl+Q | Quit |
-| Ctrl+T | Toggle dark/light theme |
 | Ctrl+L | Clear chat history |
 | PgUp/PgDown | Scroll chat |
 
@@ -1236,7 +1242,6 @@ func (m Model) renderHelp() string {
 |---------|-------------|
 | /help | Show this help |
 | /clear | Clear chat history |
-| /theme | Toggle theme |
 | /index | Index current codebase |
 | /diff | Show git diff (unstaged) |
 | /diff --staged | Show staged changes |

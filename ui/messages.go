@@ -17,7 +17,6 @@ func AvailableCommands() []CommandInfo {
 		{Command: "/settings", Description: "Open settings panel"},
 		{Command: "/clear", Description: "Clear chat history"},
 		{Command: "/new", Description: "Start new conversation"},
-		{Command: "/theme", Description: "Toggle dark/light theme"},
 		{Command: "/index", Description: "Index current codebase"},
 		{Command: "/diff", Description: "Show git diff (unstaged)"},
 		{Command: "/diff --staged", Description: "Show staged changes"},
