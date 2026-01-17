@@ -251,6 +251,13 @@ Be concise but thorough in your responses.`)
 	}
 
 	// Create the Bubble Tea program
+	// Setup logging to file
+	f, err := tea.LogToFile("open-coder.log", "debug")
+	if err != nil {
+		log.Fatalf("fatal: could not open log file: %v", err)
+	}
+	defer f.Close()
+
 	p := tea.NewProgram(
 		model,
 		tea.WithAltScreen(),       // Use alternate screen buffer (full screen)

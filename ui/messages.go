@@ -20,6 +20,11 @@ func AvailableCommands() []CommandInfo {
 		{Command: "/index", Description: "Index current codebase"},
 		{Command: "/diff", Description: "Show git diff (unstaged)"},
 		{Command: "/diff --staged", Description: "Show staged changes"},
+		{Command: "/history", Description: "Browse conversation history"},
+		{Command: "/save", Description: "Save current conversation"},
+		{Command: "/load", Description: "Load a conversation by ID"},
+		{Command: "/undo", Description: "Undo last file change (Ctrl+Z)"},
+		{Command: "/redo", Description: "Redo last undone change (Ctrl+Y)"},
 	}
 }
 
@@ -265,6 +270,8 @@ const (
 	ViewIndexing
 	ViewHelp
 	ViewDiff
+	ViewHistory // Conversation history browser
+	ViewPreview // Inline diff preview
 )
 
 // PanelFocus represents which panel is currently focused in split-pane layout
@@ -323,4 +330,84 @@ type ChatMessage struct {
 	ToolName  string // For tool messages
 	ToolID    string // For tool messages
 	Streaming bool   // Currently being streamed
+}
+
+// ConversationSavedMsg indicates a conversation was saved
+type ConversationSavedMsg struct {
+	ID    string
+	Title string
+	Error error
+}
+
+// ConversationLoadedMsg indicates a conversation was loaded
+type ConversationLoadedMsg struct {
+	ID       string
+	Title    string
+	Messages []ChatMessage
+	Error    error
+}
+
+// ConversationListMsg contains the list of saved conversations
+type ConversationListMsg struct {
+	Conversations []ConversationSummaryInfo
+	Error         error
+}
+
+// ConversationSummaryInfo contains summary info for a conversation
+type ConversationSummaryInfo struct {
+	ID           string
+	Title        string
+	Preview      string
+	MessageCount int
+	UpdatedAt    string
+}
+
+// ConversationDeletedMsg indicates a conversation was deleted
+type ConversationDeletedMsg struct {
+	ID    string
+	Error error
+}
+
+// UndoResultMsg contains the result of an undo operation
+type UndoResultMsg struct {
+	Transaction interface{} // *history.EditTransaction
+	UndoCount   int
+	RedoCount   int
+	Error       error
+}
+
+// RedoResultMsg contains the result of a redo operation
+type RedoResultMsg struct {
+	Transaction interface{} // *history.EditTransaction
+	UndoCount   int
+	RedoCount   int
+	Error       error
+}
+
+// LSP Message types
+
+// DiagnosticMsg contains diagnostics for a file
+type DiagnosticMsg struct {
+	FilePath    string
+	Diagnostics interface{} // []lsp.Diagnostic
+}
+
+// HoverMsg contains hover information
+type HoverMsg struct {
+	Content string
+	Error   error
+}
+
+// DefinitionMsg contains definition location
+type DefinitionMsg struct {
+	FilePath string
+	Line     int
+	Col      int
+	Error    error
+}
+
+// LSPStartedMsg indicates LSP server started
+type LSPStartedMsg struct {
+	Client interface{} // *lsp.GoClient
+	Error  error
 }

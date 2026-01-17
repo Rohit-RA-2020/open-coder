@@ -2,6 +2,8 @@ package ui
 
 import (
 	"fmt"
+	"open-coder/pkg/conversations"
+	"open-coder/pkg/lsp"
 	"os"
 	"strings"
 
@@ -79,6 +81,16 @@ type Model struct {
 	// Command autocomplete state
 	showCommandMenu   bool // Whether command dropdown is visible
 	commandMenuCursor int  // Currently selected command index
+
+	// Conversation history state
+	conversationList   []ConversationSummaryInfo
+	conversationCursor int
+
+	// Inline diff preview panel
+	previewPanel *PreviewPanel
+
+	// LSP Client
+	lspClient *lsp.GoClient
 }
 
 // AgentInterface defines the backend operations the UI needs
@@ -93,6 +105,19 @@ type AgentInterface interface {
 	ToggleTerminalApproval()
 	IsTerminalApprovalRequired() bool
 	GenerateCommitMessage(diffContent string, filesChanged, additions, deletions int) tea.Cmd
+	// Conversation persistence
+	SaveConversation() error
+	LoadConversation(id string) error
+	ListConversations() ([]conversations.ConversationSummary, error)
+	NewConversationSession()
+	GetCurrentConversationID() string
+	GetCurrentConversationTitle() string
+	DeleteConversation(id string) error
+	// Undo/Redo
+	Undo() tea.Cmd
+	Redo() tea.Cmd
+	GetUndoCount() int
+	GetRedoCount() int
 }
 
 // New creates a new Model with the given agent backend
@@ -136,6 +161,7 @@ func New(agent AgentInterface) Model {
 		codePanel:     NewCodePanel(styles),
 		filePicker:    &fp,
 		diffPanel:     NewDiffPanel(styles),
+		previewPanel:  NewPreviewPanel(styles),
 		view:          ViewChat,
 		panelFocus:    PanelChat,
 		messages:      []ChatMessage{},
@@ -153,7 +179,26 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		textarea.Blink,
 		m.spinner.Tick,
+		m.startLSPCmd(),
 	)
+}
+
+// startLSPCmd creates a command to start the LSP server
+func (m *Model) startLSPCmd() tea.Cmd {
+	return func() tea.Msg {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return LSPStartedMsg{Error: err}
+		}
+
+		client, err := lsp.NewGoClient(cwd)
+		if err != nil {
+			return LSPStartedMsg{Error: err}
+		}
+
+		// Return the client in the message
+		return LSPStartedMsg{Client: client, Error: nil}
+	}
 }
 
 // Update implements tea.Model
@@ -346,6 +391,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Content: fmt.Sprintf("✅ Loaded: %s", msg.Path),
 				})
 				m.updateViewport()
+				return m, m.requestDiagnosticsCmd(msg.Path)
 			}
 		}
 		return m, nil
@@ -393,6 +439,200 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.totalContextTokens = msg.TotalContextTokens
 		m.avgTokensPerSecond = msg.AvgTokensPerSecond
 		return m, nil
+
+	case ConversationSavedMsg:
+		// Show save confirmation
+		if msg.Error != nil {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: fmt.Sprintf("❌ Failed to save conversation: %v", msg.Error),
+			})
+		} else {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: fmt.Sprintf("✅ Conversation saved (ID: %s)", msg.ID),
+			})
+		}
+		m.updateViewport()
+		return m, nil
+
+	case ConversationLoadedMsg:
+		// Handle loaded conversation
+		if msg.Error != nil {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: fmt.Sprintf("❌ Failed to load conversation: %v", msg.Error),
+			})
+		} else {
+			m.messages = []ChatMessage{{
+				Role:    RoleSystem,
+				Content: fmt.Sprintf("📂 Loaded conversation: %s (ID: %s)", msg.Title, msg.ID),
+			}}
+			m.hasUserInteracted = true
+		}
+		m.updateViewport()
+		return m, nil
+
+	case ConversationListMsg:
+		// Store conversation list for history view
+		if msg.Error != nil {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: fmt.Sprintf("❌ Failed to list conversations: %v", msg.Error),
+			})
+			m.view = ViewChat
+		} else {
+			m.conversationList = msg.Conversations
+			m.conversationCursor = 0
+		}
+		m.updateViewport()
+		return m, nil
+
+	case UndoResultMsg:
+		if msg.Error != nil {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: fmt.Sprintf("⚠️ %v", msg.Error),
+			})
+		} else {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: fmt.Sprintf("↩️ Undo successful (%d more available)", msg.UndoCount),
+			})
+		}
+		m.updateViewport()
+		return m, nil
+
+	case RedoResultMsg:
+		if msg.Error != nil {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: fmt.Sprintf("⚠️ %v", msg.Error),
+			})
+		} else {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: fmt.Sprintf("↪️ Redo successful (%d more available)", msg.RedoCount),
+			})
+		}
+		m.updateViewport()
+		return m, nil
+
+	case PreviewAcceptedMsg:
+		// Apply the accepted change
+		m.messages = append(m.messages, ChatMessage{
+			Role:    RoleSystem,
+			Content: fmt.Sprintf("✅ Applied change to %s", msg.Change.Path),
+		})
+		// Check if more changes pending
+		if m.previewPanel != nil && !m.previewPanel.HasPendingChanges() {
+			m.view = ViewChat
+			m.textarea.Focus()
+		}
+		m.updateViewport()
+		return m, nil
+
+	case PreviewRejectedMsg:
+		m.messages = append(m.messages, ChatMessage{
+			Role:    RoleSystem,
+			Content: fmt.Sprintf("❌ Rejected change to %s", msg.Change.Path),
+		})
+		if m.previewPanel != nil && !m.previewPanel.HasPendingChanges() {
+			m.view = ViewChat
+			m.textarea.Focus()
+		}
+		m.updateViewport()
+		return m, nil
+
+	case PreviewAcceptAllMsg:
+		m.messages = append(m.messages, ChatMessage{
+			Role:    RoleSystem,
+			Content: fmt.Sprintf("✅ Applied %d changes", len(msg.Changes)),
+		})
+		m.view = ViewChat
+		m.textarea.Focus()
+		m.updateViewport()
+		return m, nil
+
+	case PreviewRejectedAllMsg:
+		m.messages = append(m.messages, ChatMessage{
+			Role:    RoleSystem,
+			Content: "❌ Rejected all pending changes",
+		})
+		m.view = ViewChat
+		m.textarea.Focus()
+		m.updateViewport()
+		return m, nil
+
+	case PreviewRequestedMsg:
+		// Add change to preview and switch to preview view
+		if m.previewPanel != nil {
+			m.previewPanel.AddChange(msg.Path, msg.Original, msg.New, msg.Operation, msg.ToolName)
+			m.view = ViewPreview
+		}
+		return m, nil
+
+	case LSPStartedMsg:
+		if msg.Error != nil {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: fmt.Sprintf("⚠️ LSP failed to start: %v", msg.Error),
+			})
+		} else {
+			if client, ok := msg.Client.(*lsp.GoClient); ok {
+				m.lspClient = client
+				m.messages = append(m.messages, ChatMessage{
+					Role:    RoleSystem,
+					Content: "✅ LSP (gopls) started",
+				})
+			}
+		}
+		return m, nil
+
+	case DiagnosticMsg:
+		if m.codePanel != nil && m.codePanel.FilePath == msg.FilePath {
+			if diags, ok := msg.Diagnostics.([]lsp.Diagnostic); ok {
+				m.codePanel.SetDiagnostics(diags)
+			}
+		}
+		return m, nil
+
+	case HoverMsg:
+		if m.codePanel != nil {
+			if msg.Error != nil {
+				// Optionally show error or just ignore
+			} else {
+				m.codePanel.SetHoverContent(msg.Content)
+			}
+		}
+		return m, nil
+
+	case DefinitionMsg:
+		if msg.Error != nil {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: fmt.Sprintf("⚠️ Definition lookup failed: %v", msg.Error),
+			})
+		} else {
+			// Open the file at the definition
+			if msg.FilePath != "" && m.codePanel != nil {
+				if err := m.codePanel.LoadFile(msg.FilePath); err == nil {
+					// Navigate to line (LSP is 0-based, CodePanel is 1-based)
+					line := msg.Line + 1
+					// We need a method to scroll to line in CodePanel, let's manually set it for now
+					m.codePanel.CursorLine = line
+					// Adjust offset to center
+					visibleHeight := m.codePanel.Height - 4
+					newOffset := line - (visibleHeight / 2)
+					if newOffset < 0 {
+						newOffset = 0
+					}
+					m.codePanel.Offset = newOffset
+					m.panelFocus = PanelCode
+				}
+			}
+		}
+		return m, nil
 	}
 
 	// Update textarea
@@ -424,6 +664,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSettingsKeys(msg)
 	case ViewDiff:
 		return m.handleDiffKeys(msg)
+	case ViewHistory:
+		return m.handleHistoryKeys(msg)
+	case ViewPreview:
+		return m.handlePreviewKeys(msg)
 	}
 
 	switch msg.Type {
@@ -436,6 +680,20 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyCtrlQ:
 		return m, tea.Quit
+
+	case tea.KeyCtrlZ:
+		// Undo last file change
+		if m.agent != nil {
+			return m, m.agent.Undo()
+		}
+		return m, nil
+
+	case tea.KeyCtrlY:
+		// Redo last undone change
+		if m.agent != nil {
+			return m, m.agent.Redo()
+		}
+		return m, nil
 
 	case tea.KeyEsc:
 		// Close command menu if open
@@ -566,6 +824,14 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case PanelCode:
 		if m.codePanel != nil {
+			// LSP shortcuts
+			if m.lspClient != nil {
+				if msg.Type == tea.KeyF12 {
+					return m, m.requestDefinitionCmd(m.codePanel.FilePath, m.codePanel.CursorLine-1, m.codePanel.CursorCol)
+				} else if msg.String() == "K" {
+					return m, m.requestHoverCmd(m.codePanel.FilePath, m.codePanel.CursorLine-1, m.codePanel.CursorCol)
+				}
+			}
 			newPanel, cmd := m.codePanel.Update(msg)
 			m.codePanel = newPanel
 			return m, cmd
@@ -686,7 +952,71 @@ func (m Model) handleDiffKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleHistoryKeys handles key input in history view
+func (m Model) handleHistoryKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.view = ViewChat
+		m.textarea.Focus()
+		return m, nil
+
+	case "up", "k":
+		if m.conversationCursor > 0 {
+			m.conversationCursor--
+		}
+		return m, nil
+
+	case "down", "j":
+		if m.conversationCursor < len(m.conversationList)-1 {
+			m.conversationCursor++
+		}
+		return m, nil
+
+	case "enter":
+		if len(m.conversationList) > 0 && m.conversationCursor < len(m.conversationList) {
+			id := m.conversationList[m.conversationCursor].ID
+			m.view = ViewChat
+			return m, m.loadConversationCmd(id)
+		}
+		return m, nil
+
+	case "d":
+		// Delete selected conversation
+		if len(m.conversationList) > 0 && m.conversationCursor < len(m.conversationList) {
+			id := m.conversationList[m.conversationCursor].ID
+			if m.agent != nil {
+				_ = m.agent.DeleteConversation(id)
+				// Refresh the list
+				return m, m.listConversationsCmd()
+			}
+		}
+		return m, nil
+	}
+
+	return m, nil
+}
+
+// handlePreviewKeys handles key input in diff preview view
+func (m Model) handlePreviewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "esc" || msg.String() == "q" {
+		// Close preview without accepting/rejecting
+		m.view = ViewChat
+		m.textarea.Focus()
+		return m, nil
+	}
+
+	// Delegate to preview panel
+	if m.previewPanel != nil {
+		newPanel, cmd := m.previewPanel.Update(msg)
+		m.previewPanel = newPanel
+		return m, cmd
+	}
+
+	return m, nil
+}
+
 // applyAccentColor applies the current accent color to the theme
+
 func (m *Model) applyAccentColor() tea.Cmd {
 	color := lipgloss.Color(m.accentColor.Hex())
 
@@ -747,11 +1077,20 @@ func (m Model) handleCommand(content string) (ViewState, tea.Cmd) {
 	case lower == "/settings" || lower == "settings":
 		return ViewSettings, nil
 
-	case lower == "/clear" || lower == "/new":
+	case lower == "/clear":
 		m.messages = []ChatMessage{}
 		m.hasUserInteracted = false // Show welcome screen again
 		if m.agent != nil {
 			m.agent.ClearConversation()
+		}
+		m.updateViewport()
+		return ViewChat, nil
+
+	case lower == "/new":
+		m.messages = []ChatMessage{}
+		m.hasUserInteracted = false // Show welcome screen again
+		if m.agent != nil {
+			m.agent.NewConversationSession()
 		}
 		m.updateViewport()
 		return ViewChat, nil
@@ -773,11 +1112,103 @@ func (m Model) handleCommand(content string) (ViewState, tea.Cmd) {
 		// Show staged changes
 		return ViewDiff, FetchDiff(true, "")
 
+	case lower == "/history":
+		// Show conversation history
+		return ViewHistory, m.listConversationsCmd()
+
+	case lower == "/save":
+		// Save current conversation
+		return ViewChat, m.saveConversationCmd()
+
+	case strings.HasPrefix(lower, "/load "):
+		// Load conversation by ID
+		id := strings.TrimSpace(content[6:])
+		return ViewChat, m.loadConversationCmd(id)
+
+	case lower == "/undo":
+		// Undo last file change
+		if m.agent != nil {
+			return ViewChat, m.agent.Undo()
+		}
+		return ViewChat, nil
+
+	case lower == "/redo":
+		// Redo last undone change
+		if m.agent != nil {
+			return ViewChat, m.agent.Redo()
+		}
+		return ViewChat, nil
+
 	case strings.HasPrefix(content, "@"):
 		return ViewFilePicker, nil
 
 	default:
 		return ViewChat, SendMessageCmd(content)
+	}
+}
+
+// listConversationsCmd creates a command to list saved conversations
+func (m Model) listConversationsCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.agent == nil {
+			return ConversationListMsg{Error: fmt.Errorf("agent not initialized")}
+		}
+
+		list, err := m.agent.ListConversations()
+		if err != nil {
+			return ConversationListMsg{Error: err}
+		}
+
+		summaries := make([]ConversationSummaryInfo, len(list))
+		for i, c := range list {
+			summaries[i] = ConversationSummaryInfo{
+				ID:           c.ID,
+				Title:        c.Title,
+				Preview:      c.Preview,
+				MessageCount: c.MessageCount,
+				UpdatedAt:    c.UpdatedAt.Format("Jan 2 15:04"),
+			}
+		}
+
+		return ConversationListMsg{Conversations: summaries}
+	}
+}
+
+// saveConversationCmd creates a command to save the current conversation
+func (m Model) saveConversationCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.agent == nil {
+			return ConversationSavedMsg{Error: fmt.Errorf("agent not initialized")}
+		}
+
+		err := m.agent.SaveConversation()
+		if err != nil {
+			return ConversationSavedMsg{Error: err}
+		}
+
+		return ConversationSavedMsg{
+			ID:    m.agent.GetCurrentConversationID(),
+			Title: m.agent.GetCurrentConversationTitle(),
+		}
+	}
+}
+
+// loadConversationCmd creates a command to load a conversation
+func (m Model) loadConversationCmd(id string) tea.Cmd {
+	return func() tea.Msg {
+		if m.agent == nil {
+			return ConversationLoadedMsg{Error: fmt.Errorf("agent not initialized")}
+		}
+
+		err := m.agent.LoadConversation(id)
+		if err != nil {
+			return ConversationLoadedMsg{Error: err}
+		}
+
+		return ConversationLoadedMsg{
+			ID:    m.agent.GetCurrentConversationID(),
+			Title: m.agent.GetCurrentConversationTitle(),
+		}
 	}
 }
 
@@ -942,7 +1373,12 @@ func (m Model) View() string {
 		return m.renderSettings()
 	case ViewDiff:
 		return m.renderDiff()
+	case ViewHistory:
+		return m.renderHistory()
+	case ViewPreview:
+		return m.renderPreview()
 	default:
+
 		// Show welcome screen if user hasn't started chatting yet
 		if !m.hasUserInteracted && !m.isProcessing {
 			return m.renderWelcome()
@@ -1172,6 +1608,12 @@ func (m Model) renderStatusBar() string {
 		focusLabel = "Code"
 	}
 	items = append(items, m.styles.StatusItem.Render(focusLabel))
+
+	// Error message (High priority)
+	if m.lastError != nil {
+		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149")).Bold(true)
+		items = append(items, errorStyle.Render(fmt.Sprintf("ERROR: %v", m.lastError)))
+	}
 
 	// Server status
 	if m.serverCount > 0 {
@@ -1463,4 +1905,142 @@ func (m Model) renderWelcome() string {
 		lipgloss.Center, lipgloss.Center,
 		combined,
 	)
+}
+
+// renderHistory renders the conversation history browser
+func (m Model) renderHistory() string {
+	var content strings.Builder
+
+	// Title
+	title := m.styles.HeaderTitle.Render("📜 Conversation History")
+	content.WriteString(title)
+	content.WriteString("\n\n")
+
+	if len(m.conversationList) == 0 {
+		content.WriteString(m.styles.Help.Render("No saved conversations yet.\n\n"))
+		content.WriteString(m.styles.Help.Render("Start chatting and your conversations will be auto-saved.\n"))
+	} else {
+		// Header
+		headerStyle := lipgloss.NewStyle().Bold(true).Foreground(m.styles.Theme.Subtle)
+		content.WriteString(headerStyle.Render(fmt.Sprintf("  %-10s %-35s %-15s %s\n", "ID", "Title", "Updated", "Messages")))
+		content.WriteString(strings.Repeat("─", 70) + "\n")
+
+		// List conversations
+		for i, conv := range m.conversationList {
+			prefix := "  "
+			style := lipgloss.NewStyle().Foreground(m.styles.Theme.Foreground)
+
+			if i == m.conversationCursor {
+				prefix = "▸ "
+				style = style.Bold(true).Foreground(m.styles.Theme.Primary)
+			}
+
+			// Truncate title if too long
+			title := conv.Title
+			if len(title) > 32 {
+				title = title[:32] + "..."
+			}
+
+			line := fmt.Sprintf("%s%-10s %-35s %-15s %d msgs",
+				prefix,
+				conv.ID,
+				title,
+				conv.UpdatedAt,
+				conv.MessageCount,
+			)
+			content.WriteString(style.Render(line))
+			content.WriteString("\n")
+		}
+	}
+
+	content.WriteString("\n")
+	content.WriteString(m.styles.Help.Render("↑↓/jk navigate · Enter load · d delete · q/Esc close"))
+
+	// Create a modal box
+	modalContent := m.styles.Modal.
+		Width(75).
+		Height(m.height - 10).
+		Render(content.String())
+
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		modalContent,
+	)
+}
+
+// renderPreview renders the inline diff preview panel
+func (m Model) renderPreview() string {
+	if m.previewPanel == nil {
+		return "No preview available"
+	}
+
+	// Update preview panel dimensions
+	m.previewPanel.Width = m.width - 10
+	m.previewPanel.Height = m.height - 6
+
+	// Create modal box for preview
+	modalContent := m.styles.Modal.
+		Width(m.width - 8).
+		Height(m.height - 4).
+		Render(m.previewPanel.View())
+
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		modalContent,
+	)
+}
+
+// requestDefinitionCmd requests definition from LSP
+func (m Model) requestDefinitionCmd(file string, line, col int) tea.Cmd {
+	return func() tea.Msg {
+		if m.lspClient == nil {
+			return DefinitionMsg{Error: fmt.Errorf("LSP not available")}
+		}
+		loc, err := m.lspClient.GoToDefinition(file, line, col)
+		if err != nil {
+			return DefinitionMsg{Error: err}
+		}
+		if loc == nil {
+			return DefinitionMsg{Error: fmt.Errorf("definition not found")}
+		}
+		return DefinitionMsg{
+			FilePath: lsp.URIToFilePath(loc.URI),
+			Line:     loc.Range.Start.Line,
+			Col:      loc.Range.Start.Character,
+		}
+	}
+}
+
+// requestHoverCmd requests hover info from LSP
+func (m Model) requestHoverCmd(file string, line, col int) tea.Cmd {
+	return func() tea.Msg {
+		if m.lspClient == nil {
+			return HoverMsg{Error: fmt.Errorf("LSP not available")}
+		}
+		content, err := m.lspClient.GetHoverInfo(file, line, col)
+		if err != nil {
+			return HoverMsg{Error: err}
+		}
+		return HoverMsg{Content: content}
+	}
+}
+
+// requestDiagnosticsCmd requests diagnostics from LSP
+func (m Model) requestDiagnosticsCmd(file string) tea.Cmd {
+	return func() tea.Msg {
+		if m.lspClient == nil {
+			return nil
+		}
+		// Notify LSP of file open
+		content, err := os.ReadFile(file)
+		if err == nil {
+			m.lspClient.OpenGoFile(file, string(content))
+		}
+
+		// Return cached diagnostics if any
+		diags := m.lspClient.GetFileDiagnostics(file)
+		return DiagnosticMsg{FilePath: file, Diagnostics: diags}
+	}
 }

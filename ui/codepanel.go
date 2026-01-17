@@ -10,6 +10,8 @@ import (
 	"github.com/alecthomas/chroma/v2/lexers"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"open-coder/pkg/lsp"
 )
 
 // CodePanel displays code with line numbers
@@ -18,12 +20,18 @@ type CodePanel struct {
 	Content    []string
 	Language   string
 	StartLine  int // 1-based
-	CursorLine int
+	CursorLine int // 1-based
+	CursorCol  int // 0-based
 	Offset     int
 	Styles     Styles
 	Width      int
 	Height     int
 	program    tea.Program
+
+	// LSP support
+	Diagnostics []lsp.Diagnostic
+	HoverText   string
+	ShowHover   bool
 }
 
 // NewCodePanel creates a new code panel
@@ -34,6 +42,7 @@ func NewCodePanel(styles Styles) *CodePanel {
 		Language:   "",
 		StartLine:  1,
 		CursorLine: 1,
+		CursorCol:  0,
 		Offset:     0,
 		Styles:     styles,
 		Width:      80, // Increased for better readability
@@ -258,6 +267,17 @@ func (cp *CodePanel) handleKey(msg tea.KeyMsg) (*CodePanel, tea.Cmd) {
 		}
 		cp.Offset = maxOffset
 		cp.CursorLine = cp.StartLine + cp.Offset
+
+	case "left", "h":
+		if cp.CursorCol > 0 {
+			cp.CursorCol--
+		}
+
+	case "right", "l":
+		lineContent := cp.GetLineContent(cp.CursorLine)
+		if cp.CursorCol < len(lineContent) {
+			cp.CursorCol++
+		}
 	}
 
 	return cp, nil
@@ -271,8 +291,14 @@ func (cp *CodePanel) View() string {
 
 	var b strings.Builder
 
-	// Header with file path
-	header := cp.Styles.ModalTitle.Render("📄 " + cp.FilePath)
+	// Header with file path and diagnostic count
+	headerText := "📄 " + cp.FilePath
+	diagCount := len(cp.Diagnostics)
+	if diagCount > 0 {
+		headerText += fmt.Sprintf(" (%d problems)", diagCount)
+	}
+	header := cp.Styles.ModalTitle.Render(headerText)
+
 	b.WriteString(header)
 	b.WriteString("\n")
 	b.WriteString(cp.Styles.Divider.Render(strings.Repeat("─", cp.Width-2)))
@@ -290,6 +316,16 @@ func (cp *CodePanel) View() string {
 	for i := start; i < end; i++ {
 		lineNum := cp.StartLine + i
 
+		// Check for diagnostics on this line
+		var lineDiag *lsp.Diagnostic
+		for _, d := range cp.Diagnostics {
+			// LSP uses 0-based indexing, our StartLine is usually 1
+			if d.Range.Start.Line == lineNum-1 {
+				lineDiag = &d
+				break
+			}
+		}
+
 		// Format line number
 		lineNumStr := fmt.Sprintf("%5d", lineNum)
 
@@ -302,6 +338,13 @@ func (cp *CodePanel) View() string {
 		lineStyle := cp.Styles.MessageAssist
 		if lineNum == cp.CursorLine {
 			lineStyle = lineStyle.Background(lipgloss.Color("#21262d"))
+		}
+
+		// Apply diagnostic styling if present
+		if lineDiag != nil {
+			// Error color usually red/orange
+			lineStyle = lineStyle.Underline(true).UnderlineSpaces(true)
+			lineNumStyle = lineNumStyle.Foreground(lipgloss.Color("#f85149")) // Red for error
 		}
 
 		// Get line content
@@ -318,10 +361,41 @@ func (cp *CodePanel) View() string {
 		}
 
 		// Build line
+		var renderedLine string
+		if lineNum == cp.CursorLine {
+			// Render cursor within line
+			cursorCol := cp.CursorCol
+			if cursorCol < 0 {
+				cursorCol = 0
+			}
+			if cursorCol > len(lineContent) {
+				cursorCol = len(lineContent)
+			}
+
+			before := ""
+			cursor := " "
+			after := ""
+
+			if len(lineContent) > 0 {
+				if cursorCol < len(lineContent) {
+					before = lineContent[:cursorCol]
+					cursor = string(lineContent[cursorCol])
+					after = lineContent[cursorCol+1:]
+				} else {
+					before = lineContent
+				}
+			}
+
+			cursorStyle := lipgloss.NewStyle().Background(lipgloss.Color("#58a6ff")).Foreground(lipgloss.Color("#0d1117"))
+			renderedLine = lineStyle.Render(before) + cursorStyle.Render(cursor) + lineStyle.Render(after)
+		} else {
+			renderedLine = lineStyle.Render(lineContent)
+		}
+
 		line := lipgloss.JoinHorizontal(
 			lipgloss.Top,
 			lineNumStyle.Render(lineNumStr+" │"),
-			lineStyle.Render(lineContent),
+			renderedLine,
 		)
 
 		b.WriteString(line)
@@ -333,6 +407,12 @@ func (cp *CodePanel) View() string {
 		b.WriteString("\n")
 	}
 
+	// Render hover if active
+	// Render hover if active
+	if cp.ShowHover && cp.HoverText != "" {
+		// Logic moved to end of function for overlay return
+	}
+
 	// Footer with info
 	b.WriteString(cp.Styles.Divider.Render(strings.Repeat("─", cp.Width-2)))
 	b.WriteString("\n")
@@ -341,15 +421,70 @@ func (cp *CodePanel) View() string {
 	if cp.Language != "" {
 		infoText = cp.Styles.Help.Render("Lang: " + cp.Language)
 	}
-	if len(cp.Content) > 0 {
+
+	// Show diagnostic message for current line in footer
+	var currentLineDiag *lsp.Diagnostic
+	for _, d := range cp.Diagnostics {
+		if d.Range.Start.Line == cp.CursorLine-1 {
+			currentLineDiag = &d
+			break
+		}
+	}
+
+	if currentLineDiag != nil {
+		diagMsg := fmt.Sprintf("⚠️ %s", currentLineDiag.Message)
+		if infoText != "" {
+			infoText += " │ "
+		}
+		infoText += lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149")).Render(diagMsg)
+	} else if len(cp.Content) > 0 {
 		if infoText != "" {
 			infoText += " │ "
 		}
 		infoText += cp.Styles.Help.Render(fmt.Sprintf("Lines: %d", len(cp.Content)))
 	}
+
+	// Add key hint for LSP
+	infoText += cp.Styles.Help.Render(" │ gd: def · K: hover")
+
 	b.WriteString(infoText)
 
+	// If hover is active, render it as an overlay (using lipgloss.Place usually, but here we simply return it
+	// heavily styled if we want a 'popup' feel, or we rely on the parent Model to render the popup.
+	// Let's rely on parent Model for the actual popup rendering if possible, but here we can render it
+	// if we are the focus.
+	// We'll stick to rendering it as part of the view if active.
+	if cp.ShowHover && cp.HoverText != "" {
+		return lipgloss.Place(
+			cp.Width, cp.Height,
+			lipgloss.Center, lipgloss.Center,
+			cp.Styles.Modal.Render(cp.HoverText),
+		)
+	}
+
 	return b.String()
+}
+
+// SetDiagnostics updates the diagnostics for the file
+func (cp *CodePanel) SetDiagnostics(diags []lsp.Diagnostic) {
+	cp.Diagnostics = diags
+}
+
+// SetHoverContent sets the hover text
+func (cp *CodePanel) SetHoverContent(text string) {
+	cp.HoverText = text
+	if text != "" {
+		cp.ShowHover = true
+	} else {
+		cp.ShowHover = false
+	}
+}
+
+// ToggleHover toggles hover visibility
+func (cp *CodePanel) ToggleHover() {
+	if cp.HoverText != "" {
+		cp.ShowHover = !cp.ShowHover
+	}
 }
 
 // GetLineContent returns content at specific line

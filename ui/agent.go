@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,8 @@ import (
 	"github.com/openai/openai-go/v3/option"
 	tiktoken "github.com/pkoukk/tiktoken-go"
 
+	"open-coder/pkg/conversations"
+	"open-coder/pkg/history"
 	"open-coder/pkg/indexer"
 )
 
@@ -52,6 +55,12 @@ type Agent struct {
 	outputTokens      int
 	totalResponseTime time.Duration
 	responseCount     int
+
+	// Conversation persistence
+	conversationMgr *conversations.Manager
+
+	// Undo/Redo history
+	historyMgr *history.HistoryManager
 }
 
 // MCPServer represents a connected MCP server
@@ -78,7 +87,14 @@ func NewAgent(ctx context.Context, model, apiKey, baseURL string) *Agent {
 		tke, _ = tiktoken.GetEncoding("cl100k_base")
 	}
 
-	return &Agent{
+	// Initialize conversation manager
+	cwd, _ := os.Getwd()
+	convMgr, _ := conversations.NewManager(cwd)
+
+	// Initialize history manager for undo/redo
+	histMgr, _ := history.NewHistoryManager()
+
+	agent := &Agent{
 		ctx:                     ctx,
 		cancel:                  cancel,
 		openaiClient:            &client,
@@ -91,7 +107,17 @@ func NewAgent(ctx context.Context, model, apiKey, baseURL string) *Agent {
 		messages:                make([]openai.ChatCompletionMessageParamUnion, 0),
 		requireTerminalApproval: true,
 		tokenEncoder:            tke,
+		conversationMgr:         convMgr,
+		historyMgr:              histMgr,
 	}
+
+	// Create a new conversation
+	if convMgr != nil {
+		cwd, _ := os.Getwd()
+		convMgr.NewConversation(model, cwd)
+	}
+
+	return agent
 }
 
 // SetProgram sets the tea.Program reference for sending messages
@@ -267,6 +293,9 @@ func (a *Agent) ProcessMessage(content string) tea.Cmd {
 		a.inputTokens += tokens
 		a.mu.Unlock()
 
+		// Track user message for persistence
+		a.trackConversationMessage("user", content, "", "")
+
 		a.messages = append(a.messages, openai.UserMessage(content))
 		return a.processConversation()
 	}
@@ -277,8 +306,11 @@ func (a *Agent) processConversation() tea.Msg {
 	responseStart := time.Now()
 	var currentOutputTokens int
 
+	log.Printf("Starting conversation processing with model: %s", a.model)
+
 	for {
 		// Create streaming request
+		log.Printf("Creating streaming request with %d messages", len(a.messages))
 		stream := a.openaiClient.Chat.Completions.NewStreaming(a.ctx, openai.ChatCompletionNewParams{
 			Messages:          a.messages,
 			Model:             openai.ChatModel(a.model),
@@ -289,6 +321,7 @@ func (a *Agent) processConversation() tea.Msg {
 		acc := openai.ChatCompletionAccumulator{}
 
 		// Stream the response
+		log.Println("Starting stream loop")
 		for stream.Next() {
 			current := stream.Current()
 			acc.AddChunk(current)
@@ -308,8 +341,11 @@ func (a *Agent) processConversation() tea.Msg {
 		}
 
 		if err := stream.Err(); err != nil {
+			log.Printf("Stream error: %v", err)
 			return StreamErrorMsg{Err: err}
 		}
+
+		log.Println("Stream loop completed")
 
 		// Update token stats after streaming completes
 		responseDuration := time.Since(responseStart)
@@ -321,6 +357,7 @@ func (a *Agent) processConversation() tea.Msg {
 
 		// Send token stats update to UI
 		if a.program != nil {
+			log.Printf("Sending token stats update: output=%d", currentOutputTokens)
 			input, output, ctx, avgTPS := a.GetTokenStats()
 			a.program.Send(TokenStatsUpdatedMsg{
 				InputTokens:        input,
@@ -332,11 +369,13 @@ func (a *Agent) processConversation() tea.Msg {
 
 		// Check for tool calls
 		if len(acc.Choices) > 0 && len(acc.Choices[0].Message.ToolCalls) > 0 {
+			log.Printf("Tool calls detected: %d", len(acc.Choices[0].Message.ToolCalls))
 			a.messages = append(a.messages, acc.Choices[0].Message.ToParam())
 
 			// Execute tool calls
 			for _, tc := range acc.Choices[0].Message.ToolCalls {
 				if tc.Function.Name != "" && tc.ID != "" {
+					log.Printf("Executing tool: %s", tc.Function.Name)
 					// Convert to our ToolCall type
 					toolCall := ToolCall{
 						ID:        tc.ID,
@@ -348,8 +387,10 @@ func (a *Agent) processConversation() tea.Msg {
 					var resultStr string
 					if err != nil {
 						resultStr = fmt.Sprintf("Error: %v", err)
+						log.Printf("Tool execution error: %v", err)
 					} else {
 						resultStr = fmt.Sprintf("%v", result)
+						log.Printf("Tool execution successful")
 					}
 
 					toolMessage := openai.ToolMessage(resultStr, tc.ID)
@@ -366,9 +407,12 @@ func (a *Agent) processConversation() tea.Msg {
 		// No more tool calls - add final message and finish
 		if len(acc.Choices) > 0 {
 			a.messages = append(a.messages, acc.Choices[0].Message.ToParam())
+			// Track assistant response for persistence
+			a.trackConversationMessage("assistant", acc.Choices[0].Message.Content, "", "")
 		}
 
 		// Signal completion
+		log.Println("Conversation turn complete")
 		return StreamChunkMsg{Done: true}
 	}
 }
@@ -441,6 +485,35 @@ func (a *Agent) executeTool(toolCall ToolCall) (interface{}, error) {
 
 // callTool calls an MCP tool
 func (a *Agent) callTool(ctx context.Context, toolName string, args map[string]any) (interface{}, error) {
+	// Check if this is a file-modifying tool and record original content for undo
+	var filePath string
+	var originalContent string
+	var isFileModifying bool
+
+	switch toolName {
+	case "write_file", "create_file", "edit_file", "patch_file", "replace_in_file":
+		if path, ok := args["path"].(string); ok {
+			filePath = path
+			isFileModifying = true
+			// Read original content before modification
+			if content, err := os.ReadFile(path); err == nil {
+				originalContent = string(content)
+			}
+			// Start transaction
+			a.BeginFileTransaction(fmt.Sprintf("Tool: %s", toolName), toolName)
+		}
+	case "delete_file", "remove_file":
+		if path, ok := args["path"].(string); ok {
+			filePath = path
+			isFileModifying = true
+			// Read original content before deletion
+			if content, err := os.ReadFile(path); err == nil {
+				originalContent = string(content)
+			}
+			a.BeginFileTransaction(fmt.Sprintf("Tool: %s", toolName), toolName)
+		}
+	}
+
 	for _, server := range a.servers {
 		params := &mcp.CallToolParams{
 			Name:      toolName,
@@ -449,12 +522,48 @@ func (a *Agent) callTool(ctx context.Context, toolName string, args map[string]a
 
 		res, err := server.Session.CallTool(ctx, params)
 		if err == nil {
+			// Record file change after successful modification
+			if isFileModifying && filePath != "" {
+				var newContent string
+				var operation string
+
+				switch toolName {
+				case "delete_file", "remove_file":
+					operation = "delete"
+					newContent = ""
+				case "write_file", "create_file":
+					if originalContent == "" {
+						operation = "create"
+					} else {
+						operation = "modify"
+					}
+					// Read new content
+					if content, err := os.ReadFile(filePath); err == nil {
+						newContent = string(content)
+					}
+				default:
+					operation = "modify"
+					if content, err := os.ReadFile(filePath); err == nil {
+						newContent = string(content)
+					}
+				}
+
+				a.RecordFileChange(filePath, originalContent, newContent, operation)
+				a.CommitFileTransaction()
+			}
+
 			if len(res.Content) > 0 {
 				return res.Content[0], nil
 			}
 			return "Tool executed successfully", nil
 		}
 	}
+
+	// Abort transaction on failure
+	if isFileModifying && a.historyMgr != nil {
+		a.historyMgr.AbortTransaction()
+	}
+
 	return nil, fmt.Errorf("tool %s not found in any connected server", toolName)
 }
 
@@ -615,4 +724,177 @@ func (a *Agent) DiscoverAndConnectServers() (int, error) {
 	}
 
 	return connected, nil
+}
+
+// SaveConversation saves the current conversation to disk
+func (a *Agent) SaveConversation() error {
+	if a.conversationMgr == nil {
+		return fmt.Errorf("conversation manager not initialized")
+	}
+	return a.conversationMgr.Save()
+}
+
+// LoadConversation loads a conversation by ID and restores it
+func (a *Agent) LoadConversation(id string) error {
+	if a.conversationMgr == nil {
+		return fmt.Errorf("conversation manager not initialized")
+	}
+
+	conv, err := a.conversationMgr.Load(id)
+	if err != nil {
+		return err
+	}
+
+	// Rebuild OpenAI messages from saved conversation
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.messages = []openai.ChatCompletionMessageParamUnion{
+		openai.SystemMessage(a.systemPrompt),
+	}
+
+	for _, msg := range conv.Messages {
+		switch msg.Role {
+		case "user":
+			a.messages = append(a.messages, openai.UserMessage(msg.Content))
+		case "assistant":
+			a.messages = append(a.messages, openai.AssistantMessage(msg.Content))
+		case "tool":
+			a.messages = append(a.messages, openai.ToolMessage(msg.Content, msg.ToolID))
+		}
+	}
+
+	return nil
+}
+
+// ListConversations returns a list of saved conversation summaries
+func (a *Agent) ListConversations() ([]conversations.ConversationSummary, error) {
+	if a.conversationMgr == nil {
+		return nil, fmt.Errorf("conversation manager not initialized")
+	}
+	return a.conversationMgr.List()
+}
+
+// NewConversationSession starts a fresh conversation
+func (a *Agent) NewConversationSession() {
+	a.ClearConversation()
+	if a.conversationMgr != nil {
+		cwd, _ := os.Getwd()
+		a.conversationMgr.NewConversation(a.model, cwd)
+	}
+}
+
+// GetCurrentConversationID returns the current conversation ID
+func (a *Agent) GetCurrentConversationID() string {
+	if a.conversationMgr == nil || a.conversationMgr.GetCurrent() == nil {
+		return ""
+	}
+	return a.conversationMgr.GetCurrent().ID
+}
+
+// GetCurrentConversationTitle returns the current conversation title
+func (a *Agent) GetCurrentConversationTitle() string {
+	if a.conversationMgr == nil || a.conversationMgr.GetCurrent() == nil {
+		return ""
+	}
+	return a.conversationMgr.GetCurrent().Title
+}
+
+// trackConversationMessage tracks a message in the current conversation
+func (a *Agent) trackConversationMessage(role, content, toolName, toolID string) {
+	if a.conversationMgr != nil {
+		a.conversationMgr.AddMessage(role, content, toolName, toolID)
+		// Auto-save after each message
+		_ = a.conversationMgr.Save()
+	}
+}
+
+// DeleteConversation removes a saved conversation
+func (a *Agent) DeleteConversation(id string) error {
+	if a.conversationMgr == nil {
+		return fmt.Errorf("conversation manager not initialized")
+	}
+	return a.conversationMgr.Delete(id)
+}
+
+// Undo reverts the last file change
+func (a *Agent) Undo() tea.Cmd {
+	return func() tea.Msg {
+		if a.historyMgr == nil {
+			return UndoResultMsg{Error: fmt.Errorf("history manager not initialized")}
+		}
+
+		tx, err := a.historyMgr.Undo()
+		if err != nil {
+			return UndoResultMsg{Error: err}
+		}
+
+		return UndoResultMsg{
+			Transaction: tx,
+			UndoCount:   a.historyMgr.GetUndoCount(),
+			RedoCount:   a.historyMgr.GetRedoCount(),
+		}
+	}
+}
+
+// Redo re-applies the last undone change
+func (a *Agent) Redo() tea.Cmd {
+	return func() tea.Msg {
+		if a.historyMgr == nil {
+			return RedoResultMsg{Error: fmt.Errorf("history manager not initialized")}
+		}
+
+		tx, err := a.historyMgr.Redo()
+		if err != nil {
+			return RedoResultMsg{Error: err}
+		}
+
+		return RedoResultMsg{
+			Transaction: tx,
+			UndoCount:   a.historyMgr.GetUndoCount(),
+			RedoCount:   a.historyMgr.GetRedoCount(),
+		}
+	}
+}
+
+// GetUndoCount returns number of available undo operations
+func (a *Agent) GetUndoCount() int {
+	if a.historyMgr == nil {
+		return 0
+	}
+	return a.historyMgr.GetUndoCount()
+}
+
+// GetRedoCount returns number of available redo operations
+func (a *Agent) GetRedoCount() int {
+	if a.historyMgr == nil {
+		return 0
+	}
+	return a.historyMgr.GetRedoCount()
+}
+
+// BeginFileTransaction starts tracking a file modification
+func (a *Agent) BeginFileTransaction(description, toolName string) {
+	if a.historyMgr != nil {
+		a.historyMgr.BeginTransaction(description, toolName)
+	}
+}
+
+// RecordFileChange records a file modification for undo/redo
+func (a *Agent) RecordFileChange(path, originalContent, newContent, operation string) {
+	if a.historyMgr != nil {
+		_ = a.historyMgr.RecordChange(path, originalContent, newContent, operation)
+	}
+}
+
+// CommitFileTransaction commits the current transaction
+func (a *Agent) CommitFileTransaction() {
+	if a.historyMgr != nil {
+		a.historyMgr.CommitTransaction()
+	}
+}
+
+// GetHistoryManager returns the history manager for direct access
+func (a *Agent) GetHistoryManager() *history.HistoryManager {
+	return a.historyMgr
 }
