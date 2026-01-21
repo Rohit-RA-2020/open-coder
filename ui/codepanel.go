@@ -337,14 +337,14 @@ func (cp *CodePanel) View() string {
 		// Highlight cursor line background
 		lineStyle := cp.Styles.MessageAssist
 		if lineNum == cp.CursorLine {
-			lineStyle = lineStyle.Background(lipgloss.Color("#21262d"))
+			lineStyle = lineStyle.Background(lipgloss.AdaptiveColor{Light: "#ddf4ff", Dark: "#21262d"})
 		}
 
 		// Apply diagnostic styling if present
 		if lineDiag != nil {
 			// Error color usually red/orange
 			lineStyle = lineStyle.Underline(true).UnderlineSpaces(true)
-			lineNumStyle = lineNumStyle.Foreground(lipgloss.Color("#f85149")) // Red for error
+			lineNumStyle = lineNumStyle.Foreground(cp.Styles.Theme.Error) // Red for error
 		}
 
 		// Get line content
@@ -386,7 +386,7 @@ func (cp *CodePanel) View() string {
 				}
 			}
 
-			cursorStyle := lipgloss.NewStyle().Background(lipgloss.Color("#58a6ff")).Foreground(lipgloss.Color("#0d1117"))
+			cursorStyle := lipgloss.NewStyle().Background(cp.Styles.Theme.Primary).Foreground(cp.Styles.Theme.Background)
 			renderedLine = lineStyle.Render(before) + cursorStyle.Render(cursor) + lineStyle.Render(after)
 		} else {
 			renderedLine = lineStyle.Render(lineContent)
@@ -436,7 +436,7 @@ func (cp *CodePanel) View() string {
 		if infoText != "" {
 			infoText += " │ "
 		}
-		infoText += lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149")).Render(diagMsg)
+		infoText += lipgloss.NewStyle().Foreground(cp.Styles.Theme.Error).Render(diagMsg)
 	} else if len(cp.Content) > 0 {
 		if infoText != "" {
 			infoText += " │ "

@@ -18,6 +18,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 	tiktoken "github.com/pkoukk/tiktoken-go"
 
+	"open-coder/pkg/agentic"
 	"open-coder/pkg/conversations"
 	"open-coder/pkg/history"
 	"open-coder/pkg/indexer"
@@ -145,6 +146,43 @@ func (a *Agent) ClearConversation() {
 	a.outputTokens = 0
 	a.totalResponseTime = 0
 	a.responseCount = 0
+}
+
+// TruncateContext reduces conversation history to fit within token limits
+// Keeps the system message, and the most recent messages up to maxTokens
+func (a *Agent) TruncateContext(maxTokens int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if len(a.messages) <= 2 {
+		return // Nothing to truncate
+	}
+
+	// Estimate current token usage
+	totalTokens := 0
+	for _, msg := range a.messages {
+		// Rough estimate: 4 chars per token
+		totalTokens += len(fmt.Sprintf("%v", msg)) / 4
+	}
+
+	if totalTokens <= maxTokens {
+		return // No truncation needed
+	}
+
+	// Keep system message (first) and truncate from the beginning
+	// Keep at least last 10 messages for context
+	minKeep := 10
+	if len(a.messages) <= minKeep+1 {
+		return
+	}
+
+	// Remove older messages (after system prompt) until under limit
+	for totalTokens > maxTokens && len(a.messages) > minKeep+1 {
+		// Remove the second message (first after system)
+		removedMsg := a.messages[1]
+		a.messages = append(a.messages[:1], a.messages[2:]...)
+		totalTokens -= len(fmt.Sprintf("%v", removedMsg)) / 4
+	}
 }
 
 // AddMCPServer connects to an MCP server
@@ -293,6 +331,12 @@ func (a *Agent) ProcessMessage(content string) tea.Cmd {
 		a.inputTokens += tokens
 		a.mu.Unlock()
 
+		// Check if this should trigger agentic mode
+		if a.shouldUseAgenticMode(content) {
+			// Return a message to trigger agentic mode
+			return AgenticModeStartMsg{Request: content}
+		}
+
 		// Track user message for persistence
 		a.trackConversationMessage("user", content, "", "")
 
@@ -301,8 +345,71 @@ func (a *Agent) ProcessMessage(content string) tea.Cmd {
 	}
 }
 
+// shouldUseAgenticMode determines if a request should trigger agentic planning mode
+// It detects task-like requests vs simple questions/conversations
+func (a *Agent) shouldUseAgenticMode(content string) bool {
+	lower := strings.ToLower(strings.TrimSpace(content))
+
+	// Skip short messages (likely simple questions)
+	if len(lower) < 15 {
+		return false
+	}
+
+	// Skip if it's clearly a question
+	questionStarters := []string{"what ", "what's", "how ", "why ", "when ", "where ", "who ", "can you explain", "tell me about", "describe "}
+	for _, q := range questionStarters {
+		if strings.HasPrefix(lower, q) {
+			return false
+		}
+	}
+
+	// Skip if ends with question mark
+	if strings.HasSuffix(strings.TrimSpace(content), "?") {
+		return false
+	}
+
+	// Task-like action verbs that indicate implementation work
+	taskVerbs := []string{
+		"create ", "add ", "implement ", "build ", "make ",
+		"write ", "develop ", "setup ", "set up ", "configure ",
+		"refactor ", "fix ", "update ", "modify ", "change ",
+		"remove ", "delete ", "migrate ", "convert ", "transform ",
+		"integrate ", "connect ", "install ", "deploy ",
+		"design ", "architect ", "restructure ", "optimize ",
+	}
+
+	for _, verb := range taskVerbs {
+		if strings.Contains(lower, verb) {
+			return true
+		}
+	}
+
+	// Check for specific patterns that indicate a task
+	taskPatterns := []string{
+		"i want to ", "i need to ", "please ", "could you ",
+		"let's ", "we need to ", "we should ",
+	}
+
+	for _, pattern := range taskPatterns {
+		if strings.HasPrefix(lower, pattern) {
+			// Check if followed by an action verb
+			rest := strings.TrimPrefix(lower, pattern)
+			for _, verb := range taskVerbs {
+				if strings.HasPrefix(rest, strings.TrimSpace(verb)) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
 // processConversation handles the conversation loop with streaming
 func (a *Agent) processConversation() tea.Msg {
+	// Auto-truncate context to prevent overflow (keep under ~100k tokens)
+	a.TruncateContext(80000)
+
 	responseStart := time.Now()
 	var currentOutputTokens int
 
@@ -897,4 +1004,345 @@ func (a *Agent) CommitFileTransaction() {
 // GetHistoryManager returns the history manager for direct access
 func (a *Agent) GetHistoryManager() *history.HistoryManager {
 	return a.historyMgr
+}
+
+// ============================================
+// Agentic Mode
+// ============================================
+
+// agenticPlanner is the AI task planner
+var agenticPlanner *agentic.Planner
+
+// agenticExecutor is the task executor
+var agenticExecutor *agentic.Executor
+
+// agenticTask is the current agentic task
+var agenticTask *agentic.Task
+
+// taskStorage is for task persistence
+var taskStorage *agentic.TaskStorage
+
+// StartAgenticTask initiates agentic mode for a request - analyzes project first, then shows proposal
+func (a *Agent) StartAgenticTask(request string) tea.Cmd {
+	return func() tea.Msg {
+		// Initialize planner if needed
+		if agenticPlanner == nil {
+			agenticPlanner = agentic.NewPlanner(a.openaiClient, a.model)
+		}
+
+		// Initialize storage if needed
+		cwd, _ := os.Getwd()
+		if taskStorage == nil {
+			taskStorage = agentic.NewTaskStorage(cwd)
+		}
+
+		// Step 1: Send status update - Analyzing project
+		if a.program != nil {
+			a.program.Send(StreamChunkMsg{
+				Content: "🔍 Analyzing project structure...\n",
+				Done:    false,
+			})
+		}
+
+		// Step 2: Analyze the project
+		analysis, err := agenticPlanner.AnalyzeProject(a.ctx, cwd, request)
+		if err != nil {
+			// Continue with basic context if analysis fails
+			analysis = &agentic.ProjectAnalysis{
+				Summary:  fmt.Sprintf("Project at %s (analysis unavailable)", cwd),
+				FileTree: "",
+			}
+		}
+
+		// Step 3: Send status update - Creating plan
+		if a.program != nil {
+			a.program.Send(StreamChunkMsg{
+				Content: "📋 Creating task plan based on project analysis...\n",
+				Done:    false,
+			})
+		}
+
+		// Step 4: Create task plan with analysis context
+		codebaseContext := fmt.Sprintf(`Working directory: %s
+
+Project Analysis:
+%s
+
+Project Structure:
+%s`, cwd, analysis.Summary, analysis.FileTree)
+
+		task, err := agenticPlanner.PlanTask(a.ctx, request, codebaseContext)
+		if err != nil {
+			return AgenticTaskErrorMsg{Error: err}
+		}
+
+		// Set status to awaiting approval
+		task.Status = agentic.TaskAwaitingApproval
+		agenticTask = task
+
+		// Save the task
+		_ = taskStorage.SaveTask(task)
+
+		// Create proposal for review
+		proposal := agenticPlanner.CreateProposal(task)
+
+		// Step 5: Send status update - Ready for review
+		if a.program != nil {
+			a.program.Send(StreamChunkMsg{
+				Content: "✅ Proposal ready for your review\n",
+				Done:    true,
+			})
+		}
+
+		return AgenticProposalReadyMsg{
+			TaskID:   task.ID,
+			Proposal: proposal,
+		}
+	}
+}
+
+// ExecuteApprovedTask runs the task after user approval
+func (a *Agent) ExecuteApprovedTask() tea.Cmd {
+	return func() tea.Msg {
+		if agenticTask == nil {
+			return AgenticTaskErrorMsg{Error: fmt.Errorf("no task to execute")}
+		}
+
+		// Initialize executor
+		agenticExecutor = agentic.NewExecutor(agenticPlanner, a, func(update agentic.TaskUpdate) {
+			if a.program != nil {
+				a.program.Send(AgenticTaskUpdateMsg{
+					TaskID:  update.TaskID,
+					TodoID:  update.TodoID,
+					Phase:   string(update.Phase),
+					Status:  string(update.Status),
+					Message: update.Message,
+				})
+			}
+			// Save task progress
+			if taskStorage != nil {
+				_ = taskStorage.SaveTask(agenticTask)
+			}
+		})
+
+		// Send task created message first
+		if a.program != nil {
+			a.program.Send(AgenticTaskCreatedMsg{
+				TaskID:      agenticTask.ID,
+				Title:       agenticTask.Title,
+				Description: agenticTask.Description,
+				TodoCount:   len(agenticTask.Todos),
+			})
+		}
+
+		// Execute the task
+		err := agenticExecutor.ExecuteTask(a.ctx, agenticTask)
+
+		// Save final state
+		if taskStorage != nil {
+			_ = taskStorage.SaveTask(agenticTask)
+		}
+
+		if err != nil {
+			return AgenticModeExitMsg{
+				TaskID:    agenticTask.ID,
+				Cancelled: agenticTask.Status == agentic.TaskCancelled,
+			}
+		}
+
+		return AgenticModeExitMsg{
+			TaskID:    agenticTask.ID,
+			Completed: agenticTask.Status == agentic.TaskCompleted,
+		}
+	}
+}
+
+// ExecuteAgenticTask runs the planned task (legacy - for tasks created without proposal)
+func (a *Agent) ExecuteAgenticTask() tea.Cmd {
+	return a.ExecuteApprovedTask()
+}
+
+// LoadTaskList loads all tasks from storage
+func (a *Agent) LoadTaskList() tea.Cmd {
+	return func() tea.Msg {
+		// Initialize storage if needed
+		if taskStorage == nil {
+			cwd, _ := os.Getwd()
+			taskStorage = agentic.NewTaskStorage(cwd)
+		}
+
+		summaries, err := taskStorage.ListTasks()
+		if err != nil {
+			return AgenticTaskListLoadedMsg{Error: err}
+		}
+
+		// Convert to interface slice
+		tasks := make([]interface{}, len(summaries))
+		for i, s := range summaries {
+			tasks[i] = s
+		}
+
+		return AgenticTaskListLoadedMsg{Tasks: tasks}
+	}
+}
+
+// LoadAndShowTask loads a specific task and shows it
+func (a *Agent) LoadAndShowTask(taskID string) tea.Cmd {
+	return func() tea.Msg {
+		if taskStorage == nil {
+			cwd, _ := os.Getwd()
+			taskStorage = agentic.NewTaskStorage(cwd)
+		}
+
+		task, err := taskStorage.LoadTask(taskID)
+		if err != nil {
+			return AgenticTaskErrorMsg{Error: err}
+		}
+
+		agenticTask = task
+
+		return AgenticTaskCreatedMsg{
+			TaskID:      task.ID,
+			Title:       task.Title,
+			Description: task.Description,
+			TodoCount:   len(task.Todos),
+		}
+	}
+}
+
+// DeleteTask deletes a task from storage
+func (a *Agent) DeleteTask(taskID string) tea.Cmd {
+	return func() tea.Msg {
+		if taskStorage == nil {
+			cwd, _ := os.Getwd()
+			taskStorage = agentic.NewTaskStorage(cwd)
+		}
+
+		err := taskStorage.DeleteTask(taskID)
+		return AgenticTaskDeletedMsg{
+			TaskID: taskID,
+			Error:  err,
+		}
+	}
+}
+
+// SendTodoPrompt implements agentic.ExecutorInterface
+func (a *Agent) SendTodoPrompt(ctx context.Context, prompt string) (string, error) {
+	// Add the prompt as a user message and process
+	a.messages = append(a.messages, openai.UserMessage(prompt))
+
+	// Create streaming request
+	stream := a.openaiClient.Chat.Completions.NewStreaming(ctx, openai.ChatCompletionNewParams{
+		Messages:          a.messages,
+		Model:             openai.ChatModel(a.model),
+		Tools:             a.tools,
+		ParallelToolCalls: openai.Bool(false),
+	})
+
+	acc := openai.ChatCompletionAccumulator{}
+	var result strings.Builder
+
+	for stream.Next() {
+		current := stream.Current()
+		acc.AddChunk(current)
+
+		if len(current.Choices) > 0 && current.Choices[0].Delta.Content != "" {
+			result.WriteString(current.Choices[0].Delta.Content)
+			if a.program != nil {
+				a.program.Send(StreamChunkMsg{
+					Content: current.Choices[0].Delta.Content,
+					Done:    false,
+				})
+			}
+		}
+	}
+
+	if err := stream.Err(); err != nil {
+		return "", err
+	}
+
+	// Handle tool calls if any
+	if len(acc.Choices) > 0 && len(acc.Choices[0].Message.ToolCalls) > 0 {
+		a.messages = append(a.messages, acc.Choices[0].Message.ToParam())
+
+		for _, tc := range acc.Choices[0].Message.ToolCalls {
+			if tc.Function.Name != "" && tc.ID != "" {
+				toolCall := ToolCall{
+					ID:        tc.ID,
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				}
+				toolResult, err := a.executeTool(toolCall)
+				var resultStr string
+				if err != nil {
+					resultStr = fmt.Sprintf("Error: %v", err)
+				} else {
+					resultStr = fmt.Sprintf("%v", toolResult)
+				}
+				result.WriteString(fmt.Sprintf("\n[Tool: %s] %s", tc.Function.Name, resultStr))
+				a.messages = append(a.messages, openai.ToolMessage(resultStr, tc.ID))
+			}
+		}
+	}
+
+	if len(acc.Choices) > 0 {
+		a.messages = append(a.messages, acc.Choices[0].Message.ToParam())
+	}
+
+	return result.String(), nil
+}
+
+// ExecuteVerification implements agentic.ExecutorInterface
+func (a *Agent) ExecuteVerification(ctx context.Context, command string) (string, error) {
+	// Use the terminal tool to run the verification command
+	args := map[string]any{"command": command}
+	result, err := a.callTool(ctx, "run_terminal_cmd", args)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%v", result), nil
+}
+
+// PauseAgenticTask pauses execution
+func (a *Agent) PauseAgenticTask() {
+	if agenticExecutor != nil {
+		agenticExecutor.Pause()
+	}
+}
+
+// ResumeAgenticTask resumes execution
+func (a *Agent) ResumeAgenticTask() {
+	if agenticExecutor != nil {
+		agenticExecutor.Resume()
+	}
+}
+
+// CancelAgenticTask cancels the current task
+func (a *Agent) CancelAgenticTask() {
+	if agenticExecutor != nil {
+		agenticExecutor.Cancel()
+	}
+}
+
+// SkipAgenticTodo skips a todo item
+func (a *Agent) SkipAgenticTodo(todoID string) bool {
+	if agenticExecutor != nil {
+		return agenticExecutor.SkipTodo(todoID)
+	}
+	return false
+}
+
+// GetAgenticTask returns the current agentic task
+func (a *Agent) GetAgenticTask() *agentic.Task {
+	return agenticTask
+}
+
+// IsAgenticModeActive returns whether agentic mode is running
+func (a *Agent) IsAgenticModeActive() bool {
+	return agenticExecutor != nil && agenticExecutor.IsRunning()
+}
+
+// IsAgenticModePaused returns whether agentic mode is paused
+func (a *Agent) IsAgenticModePaused() bool {
+	return agenticExecutor != nil && agenticExecutor.IsPaused()
 }

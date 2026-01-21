@@ -8,6 +8,7 @@ A powerful AI coding agent that interacts with your codebase through natural lan
 ## Features
 
 - **Modern TUI Interface** - Aesthetic split-pane terminal UI built with Bubble Tea
+- **Agentic Task Mode** - AI-powered autonomous coding with planning, execution, and verification phases
 - **Interactive File Tree** - Browse and select files from a sidebar
 - **Code Panel** - View and scroll through code files with syntax highlighting
 - **Git Diff View** - VS Code-style diff viewer with file sidebar and syntax highlighting
@@ -21,6 +22,122 @@ A powerful AI coding agent that interacts with your codebase through natural lan
 - **Binary File Handling** - Images open in system viewer; binary files are detected automatically
 - **Text Wrapping** - Proper word wrapping for narrow terminals
 
+## Agentic Task Mode
+
+Agentic Task Mode enables powerful autonomous coding capabilities. Instead of single-shot responses, the AI analyzes your request, creates a structured plan, and executes it step-by-step with your approval.
+
+### How It Works
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│    Planning     │───▶│     Review      │───▶│    Execution    │───▶│  Verification   │
+│                 │    │                 │    │                 │    │                 │
+│ • Analyze code  │    │ • View plan     │    │ • Execute todos │    │ • Run tests     │
+│ • Break down    │    │ • Y/N approve   │    │ • Track progress│    │ • Validate      │
+│ • Create todos  │    │ • Modify scope  │    │ • Handle errors │    │ • Complete      │
+└─────────────────┘    └─────────────────┘    └─────────────────┘    └─────────────────┘
+```
+
+**Phase 1: Planning** - The AI analyzes your codebase and creates a detailed plan with actionable steps  
+**Phase 2: Review** - You review the proposed plan and approve or reject it  
+**Phase 3: Execution** - The AI executes each step, showing real-time progress  
+**Phase 4: Verification** - Tests are run and changes are validated
+
+### Starting a Task
+
+Use the `/task` or `/plan` command followed by your request:
+
+```
+/task Add user authentication with JWT tokens
+/task Refactor the database layer to use connection pooling
+/plan Fix the memory leak in the worker process
+```
+
+### Task Workflow
+
+1.  **AI analyzes your codebase** - Scans project structure, key files, and patterns
+2.  **Creates a structured plan** - Breaks down your request into phases:
+    -   **Planning steps** - Read and understand relevant code
+    -   **Execution steps** - Implement the actual changes
+    -   **Verification steps** - Test and validate the changes
+3.  **Awaits your approval** - Type `Y` to approve, `N` to cancel
+4.  **Executes step-by-step** - Each todo is executed with progress tracking
+5.  **Verifies and completes** - Runs tests and validation
+
+### Task Panel
+
+When viewing a task (`/taskview`), you see a detailed breakdown:
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Task: Add JWT Authentication                        │
+│ Status: executing                                   │
+├─────────────────────────────────────────────────────┤
+│ Planning                                            │
+│   [x] Read auth middleware patterns                 │
+│   [x] Review existing user model                    │
+│                                                     │
+│ Execution                                           │
+│   [x] Create JWT service in pkg/auth                │
+│   [~] Add login/register endpoints                  │
+│   [ ] Integrate middleware with routes              │
+│                                                     │
+│ Verification                                        │
+│   [ ] Run authentication tests                      │
+│   [ ] Verify token refresh flow                     │
+└─────────────────────────────────────────────────────┘
+```
+
+**Status Indicators:**
+- `[ ]` Pending - Not yet started
+- `[~]` In Progress - Currently executing
+- `[x]` Completed - Successfully finished
+- `[!]` Failed - Encountered an error
+- `[-]` Skipped - Intentionally skipped
+
+### Task Commands
+
+| Command | Description |
+|---------|-------------|
+| `/task <request>` | Start a new agentic task |
+| `/plan <request>` | Same as /task |
+| `/taskview` | View current/last task details |
+| `/tasks` | Browse all saved tasks |
+
+### Task Panel Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate up/down through todos |
+| `g` / `G` | Jump to first/last todo |
+| `Enter` | Toggle todo details |
+| `l` | Toggle execution log |
+| `Tab` | Collapse/expand phase |
+| `p` | Pause execution |
+| `r` | Resume execution |
+| `c` | Cancel task |
+| `Esc` / `q` | Return to chat |
+
+### Inline Approval
+
+When a task plan is ready, approve directly in chat:
+
+```
+Plan: Add JWT Authentication
+
+12 steps ready. Type `Y` to approve, `N` to cancel, or `/taskview` to see details.
+
+> Y
+Plan approved! Starting execution...
+```
+
+### Task Persistence
+
+Tasks are automatically saved and can be reviewed later:
+- View task history with `/tasks`
+- Resume or review completed tasks
+- Track progress across sessions
+
 ## Project Structure
 
 ```
@@ -30,13 +147,21 @@ open-coder/
 ├── README.md               # This file
 ├── install.sh              # One-script installer
 ├── pkg/                    # Reusable packages
+│   ├── agentic/            # Agentic task system
+│   │   ├── planner.go      # AI task breakdown
+│   │   ├── executor.go     # Step-by-step execution
+│   │   ├── storage.go      # Task persistence
+│   │   └── types.go        # Task/Todo types
 │   └── indexer/            # Codebase indexing package
 ├── ui/                     # TUI Implementation (Bubble Tea)
 │   ├── model.go            # Main UI model
 │   ├── styles.go           # Lipgloss styles
 │   ├── filetree.go         # Interactive file tree component
 │   ├── codepanel.go        # Code viewer component
-│   └── diffpanel.go        # Git diff viewer component
+│   ├── diffpanel.go        # Git diff viewer component
+│   ├── taskpanel.go        # Agentic task view
+│   ├── tasklistpanel.go    # Task history browser
+│   └── proposalpanel.go    # Task approval panel
 └── tools/                  # MCP server tools directory
     ├── file-access/        # File operations MCP server
     └── terminal/           # Terminal operations MCP server
@@ -139,6 +264,10 @@ The interface features a modern TUI with split panes:
 |---------|-------------|
 | `/help` | Show help menu |
 | `/settings` | Open settings menu |
+| `/task <request>` | Start agentic task mode |
+| `/plan <request>` | Same as /task |
+| `/taskview` | View current/last task |
+| `/tasks` | Browse task history |
 | `/index` | Index current codebase |
 | `/diff` | Show git diff (unstaged changes) |
 | `/diff --staged` | Show staged changes |
@@ -215,9 +344,13 @@ Indexing complete! 15 files → 47 chunks
 ### Core Components
 
 1. **Agent Logic** - Manages OpenAI connection and tool execution
-2. **TUI (Bubble Tea)** - Terminal user interface and input handling
-3. **MCP Client** - Connects to MCP servers for capabilities
-4. **Indexer** - Semantic code indexing and search
+2. **Agentic Subsystem** - Autonomous task planning and execution
+   - **Planner** - AI-powered task breakdown and analysis
+   - **Executor** - Step-by-step todo execution with progress tracking
+   - **Storage** - Task persistence and history management
+3. **TUI (Bubble Tea)** - Terminal user interface and input handling
+4. **MCP Client** - Connects to MCP servers for capabilities
+5. **Indexer** - Semantic code indexing and search
 
 ### Data Flow
 
@@ -227,6 +360,13 @@ User Input → TUI → Agent → OpenAI API
                  MCP Client → Tools (File/Terminal)
                       ↓
                    Agent → TUI → Display
+
+Agentic Mode:
+User Request → Planner → Task Plan → User Approval
+                                          ↓
+                                      Executor → Step-by-step Execution
+                                          ↓
+                                      Verification → Completion
 ```
 
 ## Security Notes

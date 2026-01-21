@@ -685,7 +685,7 @@ func (dp *DiffPanel) renderCommitMessagePanel() string {
 	var b strings.Builder
 
 	// Header
-	title := "🤖 AI Commit Message"
+	title := "AI Commit Message"
 	if dp.GeneratingCommitMsg {
 		title += " (generating...)"
 	}
@@ -713,8 +713,8 @@ func (dp *DiffPanel) renderCommitMessagePanel() string {
 		b.WriteString("\n\n")
 		// Style the commit message nicely
 		msgStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#e6edf3")).
-			Background(lipgloss.Color("#21262d")).
+			Foreground(dp.Styles.Theme.Foreground).
+			Background(lipgloss.AdaptiveColor{Light: "#f6f8fa", Dark: "#21262d"}).
 			Padding(1, 2).
 			Width(dp.Width - 14)
 		b.WriteString(msgStyle.Render(dp.CommitMessage))
@@ -818,7 +818,7 @@ func (dp *DiffPanel) renderFileList() string {
 			// Apply selected style
 			selectedStyle := dp.Styles.FilePickerSelected
 			if dp.Focus == DiffFocusFileList {
-				selectedStyle = selectedStyle.Background(lipgloss.Color("#21262d"))
+				selectedStyle = selectedStyle.Background(lipgloss.AdaptiveColor{Light: "#ddf4ff", Dark: "#21262d"})
 			}
 			b.WriteString(selectedStyle.Render(line))
 		} else {
@@ -988,7 +988,7 @@ func (dp *DiffPanel) renderDiffLine(line DiffLine, isCursor bool, maxWidth int) 
 
 	// Highlight cursor line
 	if isCursor && dp.Focus == DiffFocusContent {
-		lineStyle = lineStyle.Background(lipgloss.Color("#21262d"))
+		lineStyle = lineStyle.Background(lipgloss.AdaptiveColor{Light: "#ddf4ff", Dark: "#21262d"})
 	}
 
 	// Format the line

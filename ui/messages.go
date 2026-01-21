@@ -25,6 +25,10 @@ func AvailableCommands() []CommandInfo {
 		{Command: "/load", Description: "Load a conversation by ID"},
 		{Command: "/undo", Description: "Undo last file change (Ctrl+Z)"},
 		{Command: "/redo", Description: "Redo last undone change (Ctrl+Y)"},
+		{Command: "/task", Description: "Start agentic task mode"},
+		{Command: "/plan", Description: "Plan a coding task with AI"},
+		{Command: "/taskview", Description: "View current/last agentic task"},
+		{Command: "/tasks", Description: "Browse all agentic tasks"},
 	}
 }
 
@@ -270,8 +274,11 @@ const (
 	ViewIndexing
 	ViewHelp
 	ViewDiff
-	ViewHistory // Conversation history browser
-	ViewPreview // Inline diff preview
+	ViewHistory         // Conversation history browser
+	ViewPreview         // Inline diff preview
+	ViewAgenticTask     // Agentic task panel
+	ViewAgenticProposal // Task proposal for approval
+	ViewAgenticTaskList // Browse all agentic tasks
 )
 
 // PanelFocus represents which panel is currently focused in split-pane layout
@@ -409,5 +416,130 @@ type DefinitionMsg struct {
 // LSPStartedMsg indicates LSP server started
 type LSPStartedMsg struct {
 	Client interface{} // *lsp.GoClient
+	Error  error
+}
+
+// ============================================
+// Agentic Mode Messages
+// ============================================
+
+// AgenticModeStartMsg starts agentic mode for a request
+type AgenticModeStartMsg struct {
+	Request string
+}
+
+// AgenticTaskCreatedMsg indicates a task plan was created
+type AgenticTaskCreatedMsg struct {
+	TaskID      string
+	Title       string
+	Description string
+	TodoCount   int
+}
+
+// AgenticTaskUpdateMsg provides task/todo status updates
+type AgenticTaskUpdateMsg struct {
+	TaskID  string
+	TodoID  string
+	Phase   string
+	Status  string
+	Message string
+}
+
+// AgenticPhaseChangedMsg indicates phase transition
+type AgenticPhaseChangedMsg struct {
+	TaskID   string
+	NewPhase string // "planning", "execution", "verification", "completed"
+}
+
+// AgenticTaskProgressMsg provides progress percentage
+type AgenticTaskProgressMsg struct {
+	TaskID  string
+	Percent float64
+	Current int
+	Total   int
+}
+
+// AgenticVerificationResultMsg contains verification outcome
+type AgenticVerificationResultMsg struct {
+	StepID string
+	Passed bool
+	Output string
+}
+
+// AgenticModeExitMsg exits agentic mode
+type AgenticModeExitMsg struct {
+	TaskID    string
+	Completed bool
+	Cancelled bool
+}
+
+// AgenticPauseMsg pauses task execution
+type AgenticPauseMsg struct{}
+
+// AgenticResumeMsg resumes paused execution
+type AgenticResumeMsg struct{}
+
+// AgenticCancelMsg cancels the current task
+type AgenticCancelMsg struct{}
+
+// AgenticSkipTodoMsg skips the current todo
+type AgenticSkipTodoMsg struct {
+	TodoID string
+}
+
+// AgenticTaskErrorMsg indicates an error in agentic mode
+type AgenticTaskErrorMsg struct {
+	TaskID string
+	Error  error
+}
+
+// ============================================
+// Proposal & Task List Messages
+// ============================================
+
+// AgenticProposalReadyMsg indicates a proposal is ready for review
+type AgenticProposalReadyMsg struct {
+	TaskID   string
+	Proposal interface{} // *agentic.TaskProposal
+}
+
+// AgenticProposalApprovedMsg indicates user approved the proposal
+type AgenticProposalApprovedMsg struct {
+	TaskID string
+}
+
+// AgenticProposalRejectedMsg indicates user rejected the proposal
+type AgenticProposalRejectedMsg struct {
+	TaskID string
+}
+
+// AgenticProposalEditMsg indicates user wants to edit the proposal
+type AgenticProposalEditMsg struct {
+	TaskID   string
+	Feedback string
+}
+
+// AgenticLoadTaskListMsg requests loading the task list
+type AgenticLoadTaskListMsg struct{}
+
+// AgenticTaskListLoadedMsg contains the loaded task list
+type AgenticTaskListLoadedMsg struct {
+	Tasks []interface{} // []agentic.TaskSummary
+	Error error
+}
+
+// AgenticTaskSelectedMsg indicates a task was selected from the list
+type AgenticTaskSelectedMsg struct {
+	TaskID string
+}
+
+// AgenticDeleteTaskMsg requests deletion of a task
+type AgenticDeleteTaskMsg struct {
+	TaskID string
+}
+
+// AgenticTaskDeletedMsg indicates a task was deleted
+type AgenticTaskDeletedMsg struct {
+	TaskID string
 	Error  error
 }

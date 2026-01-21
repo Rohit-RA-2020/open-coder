@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"open-coder/pkg/agentic"
 	"open-coder/pkg/conversations"
 	"open-coder/pkg/lsp"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/glamour/ansi"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -91,6 +93,12 @@ type Model struct {
 
 	// LSP Client
 	lspClient *lsp.GoClient
+
+	// Agentic Mode
+	taskPanel     *TaskPanel
+	proposalPanel *ProposalPanel
+	taskListPanel *TaskListPanel
+	isAgenticMode bool
 }
 
 // AgentInterface defines the backend operations the UI needs
@@ -126,10 +134,10 @@ func New(agent AgentInterface) Model {
 	ta := textarea.New()
 	ta.Placeholder = "Type your message... (@ to browse files, /help for commands)"
 	ta.Focus()
-	ta.Prompt = ""
+	ta.Prompt = "▸ " // Show prompt on same line as input
 	ta.CharLimit = 0 // No limit
 	ta.SetWidth(80)
-	ta.SetHeight(3)
+	ta.SetHeight(1) // Single line input
 	ta.ShowLineNumbers = false
 	ta.KeyMap.InsertNewline.SetEnabled(false) // Enter sends, not newline
 
@@ -138,14 +146,100 @@ func New(agent AgentInterface) Model {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff"))
 
-	// Create markdown renderer
-	renderer, _ := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+	// Create markdown renderer with custom dark style that:
+	// 1. Properly renders headers without showing ## prefix
+	// 2. Uses app's blue accent color for headers
+	// 3. Compact spacing for chat display
+	markdownStyle := ansi.StyleConfig{
+		Document: ansi.StyleBlock{
+			Margin: uintPtr(0),
+		},
+		Heading: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				BlockPrefix: "▌ ",
+				Color:       stringPtr("#58a6ff"),
+				Bold:        boolPtr(true),
+			},
+		},
+		H1: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				Prefix: "",
+				Color:  stringPtr("#58a6ff"),
+				Bold:   boolPtr(true),
+			},
+		},
+		H2: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				Prefix: "",
+				Color:  stringPtr("#58a6ff"),
+				Bold:   boolPtr(true),
+			},
+		},
+		H3: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				Prefix: "",
+				Color:  stringPtr("#79c0ff"),
+				Bold:   boolPtr(true),
+			},
+		},
+		Paragraph: ansi.StyleBlock{
+			Margin: uintPtr(0),
+		},
+		List: ansi.StyleList{
+			StyleBlock: ansi.StyleBlock{
+				Margin: uintPtr(0),
+			},
+			LevelIndent: 2,
+		},
+		Item: ansi.StylePrimitive{
+			BlockPrefix: "• ",
+		},
+		Enumeration: ansi.StylePrimitive{
+			BlockPrefix: ". ",
+		},
+		Emph: ansi.StylePrimitive{
+			Italic: boolPtr(true),
+		},
+		Strong: ansi.StylePrimitive{
+			Bold: boolPtr(true),
+		},
+		Code: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				Color: stringPtr("#ffa657"),
+			},
+		},
+		CodeBlock: ansi.StyleCodeBlock{
+			StyleBlock: ansi.StyleBlock{
+				Margin: uintPtr(0),
+			},
+			Chroma: &ansi.Chroma{
+				Text: ansi.StylePrimitive{
+					Color: stringPtr("#c9d1d9"),
+				},
+				Keyword: ansi.StylePrimitive{
+					Color: stringPtr("#ff7b72"),
+				},
+				Name: ansi.StylePrimitive{
+					Color: stringPtr("#79c0ff"),
+				},
+				LiteralString: ansi.StylePrimitive{
+					Color: stringPtr("#a5d6ff"),
+				},
+			},
+		},
+	}
+
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithStyles(markdownStyle),
 		glamour.WithWordWrap(80),
 	)
+	if err != nil {
+		// Log error but continue - nil renderer will be handled in renderMessage
+		renderer = nil
+	}
 
 	// Initialize styles
-	styles := NewStyles(DarkTheme)
+	styles := NewStyles(AdaptiveTheme)
 
 	// Get working directory for file tree
 	wd, _ := os.Getwd()
@@ -162,6 +256,9 @@ func New(agent AgentInterface) Model {
 		filePicker:    &fp,
 		diffPanel:     NewDiffPanel(styles),
 		previewPanel:  NewPreviewPanel(styles),
+		taskPanel:     NewTaskPanel(styles),
+		proposalPanel: NewProposalPanel(styles),
+		taskListPanel: NewTaskListPanel(styles),
 		view:          ViewChat,
 		panelFocus:    PanelChat,
 		messages:      []ChatMessage{},
@@ -633,6 +730,238 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	// ============================================
+	// Agentic Mode Messages
+	// ============================================
+
+	case AgenticModeStartMsg:
+		// Start agentic task planning - stay in chat view, show progress inline
+		m.isAgenticMode = true
+		m.hasUserInteracted = true
+
+		// Show task starting message in chat
+		m.messages = append(m.messages, ChatMessage{
+			Role:    RoleUser,
+			Content: msg.Request,
+		})
+		m.messages = append(m.messages, ChatMessage{
+			Role:    RoleSystem,
+			Content: "🎯 **Starting Task**\n\n🔍 Analyzing project structure...",
+		})
+		m.isProcessing = true
+		m.updateViewport()
+		if agent, ok := m.agent.(*Agent); ok {
+			return m, agent.StartAgenticTask(msg.Request)
+		}
+		return m, nil
+
+	case AgenticTaskCreatedMsg:
+		// Task plan created - stay in chat, show summary
+		if m.taskPanel != nil {
+			if agent, ok := m.agent.(*Agent); ok {
+				m.taskPanel.SetTask(agent.GetAgenticTask())
+				m.taskPanel.SetSize(m.width-4, m.height-4)
+			}
+		}
+		// Show plan summary in chat
+		m.messages = append(m.messages, ChatMessage{
+			Role:    RoleSystem,
+			Content: fmt.Sprintf("📋 **Plan: %s**\n\n%d steps ready. Type `Y` to approve, `N` to cancel, or `/taskview` to see details.", msg.Title, msg.TodoCount),
+		})
+		m.isProcessing = false
+		m.updateViewport()
+		// Don't auto-start - wait for approval
+		return m, nil
+
+	case AgenticTaskUpdateMsg:
+		// Update task panel with progress
+		if m.taskPanel != nil {
+			// The task panel will auto-refresh since it references the task
+		}
+		return m, nil
+
+	case AgenticPhaseChangedMsg:
+		m.messages = append(m.messages, ChatMessage{
+			Role:    RoleSystem,
+			Content: fmt.Sprintf("📍 Phase: %s", msg.NewPhase),
+		})
+		m.updateViewport()
+		return m, nil
+
+	case AgenticModeExitMsg:
+		m.isAgenticMode = false
+		// Keep task panel visible after completion so user can review
+		// Only auto-close on cancellation
+		if msg.Completed {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: "✅ Agentic task completed! (Press Esc to close task panel)",
+			})
+			// Stay in ViewAgenticTask so user can review
+		} else if msg.Cancelled {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: "⛔ Agentic task cancelled",
+			})
+			m.view = ViewChat
+			m.textarea.Focus()
+		}
+		m.updateViewport()
+		return m, nil
+
+	case AgenticTaskErrorMsg:
+		m.isAgenticMode = false
+		m.messages = append(m.messages, ChatMessage{
+			Role:    RoleSystem,
+			Content: fmt.Sprintf("❌ Agentic error: %v", msg.Error),
+		})
+		// Keep task panel visible so user can see what failed
+		m.updateViewport()
+		return m, nil
+
+	case AgenticPauseMsg:
+		if agent, ok := m.agent.(*Agent); ok {
+			agent.PauseAgenticTask()
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: "⏸️ Task paused",
+			})
+			m.updateViewport()
+		}
+		return m, nil
+
+	case AgenticResumeMsg:
+		if agent, ok := m.agent.(*Agent); ok {
+			agent.ResumeAgenticTask()
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: "▶️ Task resumed",
+			})
+			m.updateViewport()
+		}
+		return m, nil
+
+	case AgenticCancelMsg:
+		if agent, ok := m.agent.(*Agent); ok {
+			agent.CancelAgenticTask()
+		}
+		return m, nil
+
+	case AgenticSkipTodoMsg:
+		if agent, ok := m.agent.(*Agent); ok {
+			agent.SkipAgenticTodo(msg.TodoID)
+		}
+		return m, nil
+
+	// ============================================
+	// Proposal & Task List Messages
+	// ============================================
+
+	case AgenticProposalReadyMsg:
+		// Show proposal for approval
+		if m.proposalPanel != nil {
+			if proposal, ok := msg.Proposal.(*agentic.TaskProposal); ok {
+				m.proposalPanel.SetProposal(proposal)
+				m.proposalPanel.SetSize(m.width-10, m.height-6)
+			}
+		}
+		m.view = ViewAgenticProposal
+		m.messages = append(m.messages, ChatMessage{
+			Role:    RoleSystem,
+			Content: "📝 Task proposal ready for review",
+		})
+		m.updateViewport()
+		return m, nil
+
+	case AgenticProposalApprovedMsg:
+		// User approved, start execution
+		m.view = ViewAgenticTask
+		m.messages = append(m.messages, ChatMessage{
+			Role:    RoleSystem,
+			Content: "✅ Proposal approved, starting execution...",
+		})
+		m.updateViewport()
+		if agent, ok := m.agent.(*Agent); ok {
+			return m, agent.ExecuteApprovedTask()
+		}
+		return m, nil
+
+	case AgenticProposalRejectedMsg:
+		// User rejected, return to chat
+		m.isAgenticMode = false
+		m.view = ViewChat
+		m.hasUserInteracted = false
+		m.textarea.Focus()
+		m.messages = append(m.messages, ChatMessage{
+			Role:    RoleSystem,
+			Content: "❌ Proposal rejected",
+		})
+		m.updateViewport()
+		return m, nil
+
+	case AgenticLoadTaskListMsg:
+		// Load task list
+		m.view = ViewAgenticTaskList
+		if m.taskListPanel != nil {
+			m.taskListPanel.Loading = true
+			m.taskListPanel.SetSize(m.width-10, m.height-6)
+		}
+		if agent, ok := m.agent.(*Agent); ok {
+			return m, agent.LoadTaskList()
+		}
+		return m, nil
+
+	case AgenticTaskListLoadedMsg:
+		// Populate task list panel
+		if m.taskListPanel != nil {
+			if msg.Error != nil {
+				m.taskListPanel.Error = msg.Error
+				m.taskListPanel.Loading = false
+			} else {
+				var summaries []agentic.TaskSummary
+				for _, t := range msg.Tasks {
+					if summary, ok := t.(agentic.TaskSummary); ok {
+						summaries = append(summaries, summary)
+					}
+				}
+				m.taskListPanel.SetTasks(summaries)
+			}
+		}
+		return m, nil
+
+	case AgenticTaskSelectedMsg:
+		// Load and show selected task
+		if agent, ok := m.agent.(*Agent); ok {
+			return m, agent.LoadAndShowTask(msg.TaskID)
+		}
+		return m, nil
+
+	case AgenticDeleteTaskMsg:
+		// Delete a task
+		if agent, ok := m.agent.(*Agent); ok {
+			return m, agent.DeleteTask(msg.TaskID)
+		}
+		return m, nil
+
+	case AgenticTaskDeletedMsg:
+		if msg.Error != nil {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: fmt.Sprintf("❌ Failed to delete task: %v", msg.Error),
+			})
+		} else {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: fmt.Sprintf("🗑️ Task %s deleted", msg.TaskID),
+			})
+			// Refresh list
+			if agent, ok := m.agent.(*Agent); ok {
+				return m, agent.LoadTaskList()
+			}
+		}
+		m.updateViewport()
+		return m, nil
 	}
 
 	// Update textarea
@@ -668,6 +997,12 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleHistoryKeys(msg)
 	case ViewPreview:
 		return m.handlePreviewKeys(msg)
+	case ViewAgenticTask:
+		return m.handleAgenticKeys(msg)
+	case ViewAgenticProposal:
+		return m.handleProposalKeys(msg)
+	case ViewAgenticTaskList:
+		return m.handleTaskListKeys(msg)
 	}
 
 	switch msg.Type {
@@ -1015,6 +1350,84 @@ func (m Model) handlePreviewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleAgenticKeys handles key input in agentic task view
+func (m Model) handleAgenticKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		// If task is not actively running, return to welcome screen
+		if m.taskPanel != nil && m.taskPanel.Task != nil {
+			status := m.taskPanel.Task.Status
+			if status == agentic.TaskCompleted ||
+				status == agentic.TaskCancelled ||
+				status == agentic.TaskFailed {
+				// Task is done, return to welcome screen
+				m.view = ViewChat
+				m.hasUserInteracted = false // Shows welcome screen
+				m.textarea.Focus()
+				return m, nil
+			}
+		}
+		// If actively running, just minimize to chat view (keep running)
+		m.view = ViewChat
+		m.textarea.Focus()
+		return m, nil
+	case "q":
+		// Only q exits without going to welcome
+		m.view = ViewChat
+		m.textarea.Focus()
+		return m, nil
+	}
+
+	// Delegate to task panel
+	if m.taskPanel != nil {
+		newPanel, cmd := m.taskPanel.Update(msg)
+		m.taskPanel = newPanel
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+// handleProposalKeys handles key input in proposal view
+func (m Model) handleProposalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		// Cancel and return to chat with welcome
+		m.view = ViewChat
+		m.hasUserInteracted = false
+		m.textarea.Focus()
+		return m, nil
+	}
+
+	// Delegate to proposal panel
+	if m.proposalPanel != nil {
+		newPanel, cmd := m.proposalPanel.Update(msg)
+		m.proposalPanel = newPanel
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+// handleTaskListKeys handles key input in task list view
+func (m Model) handleTaskListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.view = ViewChat
+		m.textarea.Focus()
+		return m, nil
+	}
+
+	// Delegate to task list panel
+	if m.taskListPanel != nil {
+		newPanel, cmd := m.taskListPanel.Update(msg)
+		m.taskListPanel = newPanel
+		return m, cmd
+	}
+
+	return m, nil
+}
+
 // applyAccentColor applies the current accent color to the theme
 
 func (m *Model) applyAccentColor() tea.Cmd {
@@ -1069,6 +1482,31 @@ func (m *Model) updateCommandMenu() {
 // handleCommand processes special commands
 func (m Model) handleCommand(content string) (ViewState, tea.Cmd) {
 	lower := strings.ToLower(content)
+
+	// Handle inline approval for agentic mode
+	if m.isAgenticMode && m.taskPanel != nil && m.taskPanel.Task != nil {
+		if m.taskPanel.Task.Status == agentic.TaskAwaitingApproval {
+			if lower == "y" || lower == "yes" {
+				// Approve and execute
+				m.messages = append(m.messages, ChatMessage{
+					Role:    RoleUser,
+					Content: "Y",
+				})
+				return ViewChat, func() tea.Msg {
+					return AgenticProposalApprovedMsg{TaskID: m.taskPanel.Task.ID}
+				}
+			} else if lower == "n" || lower == "no" {
+				// Reject
+				m.messages = append(m.messages, ChatMessage{
+					Role:    RoleUser,
+					Content: "N",
+				})
+				return ViewChat, func() tea.Msg {
+					return AgenticProposalRejectedMsg{TaskID: m.taskPanel.Task.ID}
+				}
+			}
+		}
+	}
 
 	switch {
 	case lower == "/help" || lower == "help":
@@ -1138,6 +1576,40 @@ func (m Model) handleCommand(content string) (ViewState, tea.Cmd) {
 			return ViewChat, m.agent.Redo()
 		}
 		return ViewChat, nil
+
+	case strings.HasPrefix(lower, "/task "):
+		// Start agentic task mode
+		request := strings.TrimSpace(content[6:])
+		if request == "" {
+			return ViewChat, nil
+		}
+		return ViewAgenticTask, func() tea.Msg {
+			return AgenticModeStartMsg{Request: request}
+		}
+
+	case strings.HasPrefix(lower, "/plan "):
+		// Plan a task (same as /task for now)
+		request := strings.TrimSpace(content[6:])
+		if request == "" {
+			return ViewChat, nil
+		}
+		return ViewAgenticTask, func() tea.Msg {
+			return AgenticModeStartMsg{Request: request}
+		}
+
+	case lower == "/taskview":
+		// View current/last agentic task
+		if m.taskPanel != nil && m.taskPanel.Task != nil {
+			return ViewAgenticTask, nil
+		}
+		// No task to view
+		return ViewChat, nil
+
+	case lower == "/tasks":
+		// Show all agentic tasks
+		return ViewAgenticTaskList, func() tea.Msg {
+			return AgenticLoadTaskListMsg{}
+		}
 
 	case strings.HasPrefix(content, "@"):
 		return ViewFilePicker, nil
@@ -1308,12 +1780,16 @@ func (m *Model) renderMessage(msg ChatMessage) string {
 
 	case RoleAssistant:
 		label = m.styles.MessageLabel.Foreground(m.styles.Theme.AssistantMessage).Render("Assistant ▸")
-		// Try to render as markdown
-		rendered, err := m.renderer.Render(msg.Content)
-		if err != nil {
-			content = m.styles.MessageAssist.Width(maxWidth).Render(msg.Content)
+		// Try to render as markdown (with nil check for renderer)
+		if m.renderer != nil {
+			rendered, err := m.renderer.Render(msg.Content)
+			if err == nil {
+				content = strings.TrimSpace(rendered)
+			} else {
+				content = m.styles.MessageAssist.Width(maxWidth).Render(msg.Content)
+			}
 		} else {
-			content = strings.TrimSpace(rendered)
+			content = m.styles.MessageAssist.Width(maxWidth).Render(msg.Content)
 		}
 		if msg.Streaming {
 			content += m.spinner.View()
@@ -1377,6 +1853,12 @@ func (m Model) View() string {
 		return m.renderHistory()
 	case ViewPreview:
 		return m.renderPreview()
+	case ViewAgenticTask:
+		return m.renderAgenticTask()
+	case ViewAgenticProposal:
+		return m.renderAgenticProposal()
+	case ViewAgenticTaskList:
+		return m.renderAgenticTaskList()
 	default:
 
 		// Show welcome screen if user hasn't started chatting yet
@@ -1505,7 +1987,7 @@ func (m Model) renderChat() string {
 	}
 	inputBox := inputStyle.
 		Width(m.width - 4).
-		Render(m.styles.InputPrompt.Render("▸ ") + m.textarea.View())
+		Render(m.textarea.View())
 
 	// Status bar
 	statusBar := m.renderStatusBar()
@@ -1574,7 +2056,7 @@ func (m Model) renderCommandMenu() string {
 
 // renderHeader renders the top header bar
 func (m Model) renderHeader() string {
-	title := m.styles.HeaderTitle.Render("🤖 Open Coder")
+	title := m.styles.HeaderTitle.Render("Open Coder")
 
 	var info string
 	if m.modelName != "" {
@@ -1840,7 +2322,7 @@ func (m Model) renderWelcome() string {
 
 	// Model info
 	if m.modelName != "" {
-		modelInfo := m.styles.StatusValue.Align(lipgloss.Center).Render("🤖 " + m.modelName)
+		modelInfo := m.styles.StatusValue.Align(lipgloss.Center).Render(m.modelName)
 		content.WriteString(modelInfo)
 		content.WriteString("\n")
 	}
@@ -1878,7 +2360,7 @@ func (m Model) renderWelcome() string {
 	inputBox := m.styles.InputContainer.
 		Width(70).
 		BorderForeground(m.styles.Theme.BorderFocused).
-		Render(m.styles.InputPrompt.Render("▸ ") + m.textarea.View())
+		Render(m.textarea.View())
 
 	// Combine logo, command menu (if shown), and input
 	var combined string
@@ -1992,6 +2474,63 @@ func (m Model) renderPreview() string {
 	)
 }
 
+// renderAgenticTask renders the agentic task panel view
+func (m Model) renderAgenticTask() string {
+	if m.taskPanel == nil {
+		return "No task panel available"
+	}
+
+	// Update task panel dimensions
+	m.taskPanel.SetSize(m.width-4, m.height-4)
+
+	// Render task panel centered
+	taskContent := m.taskPanel.View()
+
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		taskContent,
+	)
+}
+
+// renderAgenticProposal renders the task proposal for approval
+func (m Model) renderAgenticProposal() string {
+	if m.proposalPanel == nil {
+		return "No proposal available"
+	}
+
+	// Update proposal panel dimensions
+	m.proposalPanel.SetSize(m.width-8, m.height-4)
+
+	// Render proposal panel centered
+	proposalContent := m.proposalPanel.View()
+
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		proposalContent,
+	)
+}
+
+// renderAgenticTaskList renders the task history list
+func (m Model) renderAgenticTaskList() string {
+	if m.taskListPanel == nil {
+		return "No task list available"
+	}
+
+	// Update task list panel dimensions
+	m.taskListPanel.SetSize(m.width-8, m.height-4)
+
+	// Render task list panel centered
+	listContent := m.taskListPanel.View()
+
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		listContent,
+	)
+}
+
 // requestDefinitionCmd requests definition from LSP
 func (m Model) requestDefinitionCmd(file string, line, col int) tea.Cmd {
 	return func() tea.Msg {
@@ -2044,3 +2583,8 @@ func (m Model) requestDiagnosticsCmd(file string) tea.Cmd {
 		return DiagnosticMsg{FilePath: file, Diagnostics: diags}
 	}
 }
+
+// Helper functions for glamour style configuration
+func stringPtr(s string) *string { return &s }
+func uintPtr(u uint) *uint       { return &u }
+func boolPtr(b bool) *bool       { return &b }

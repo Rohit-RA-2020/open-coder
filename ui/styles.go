@@ -4,109 +4,82 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Theme represents a color theme (dark or light)
+// Theme represents a color theme (adapts to light/dark)
 type Theme struct {
 	Name string
 
 	// Base colors
-	Background lipgloss.Color
-	Foreground lipgloss.Color
-	Subtle     lipgloss.Color
-	Highlight  lipgloss.Color
-	Special    lipgloss.Color
+	Background lipgloss.TerminalColor
+	Foreground lipgloss.TerminalColor
+	Subtle     lipgloss.TerminalColor
+	Highlight  lipgloss.TerminalColor
+	Special    lipgloss.TerminalColor
 
 	// Semantic colors
-	Primary   lipgloss.Color
-	Secondary lipgloss.Color
-	Success   lipgloss.Color
-	Warning   lipgloss.Color
-	Error     lipgloss.Color
-	Info      lipgloss.Color
+	Primary   lipgloss.TerminalColor
+	Secondary lipgloss.TerminalColor
+	Success   lipgloss.TerminalColor
+	Warning   lipgloss.TerminalColor
+	Error     lipgloss.TerminalColor
+	Info      lipgloss.TerminalColor
 
 	// Chat colors
-	UserMessage      lipgloss.Color
-	AssistantMessage lipgloss.Color
-	SystemMessage    lipgloss.Color
-	ToolMessage      lipgloss.Color
+	UserMessage      lipgloss.TerminalColor
+	AssistantMessage lipgloss.TerminalColor
+	SystemMessage    lipgloss.TerminalColor
+	ToolMessage      lipgloss.TerminalColor
 
 	// UI element colors
-	Border        lipgloss.Color
-	BorderFocused lipgloss.Color
-	StatusBar     lipgloss.Color
-	StatusBarText lipgloss.Color
-	InputBg       lipgloss.Color
-	InputText     lipgloss.Color
-	Placeholder   lipgloss.Color
+	Border        lipgloss.TerminalColor
+	BorderFocused lipgloss.TerminalColor
+	StatusBar     lipgloss.TerminalColor
+	StatusBarText lipgloss.TerminalColor
+	InputBg       lipgloss.TerminalColor
+	InputText     lipgloss.TerminalColor
+	Placeholder   lipgloss.TerminalColor
+
+	// Diff colors
+	DiffAddedBg   lipgloss.TerminalColor
+	DiffRemovedBg lipgloss.TerminalColor
 }
 
-// DarkTheme is the default dark color scheme
-var DarkTheme = Theme{
-	Name: "dark",
+// AdaptiveTheme is the auto-adapting color scheme
+var AdaptiveTheme = Theme{
+	Name: "adaptive",
 
-	// Base colors - Deep, rich dark theme
-	Background: lipgloss.Color("#0d1117"),
-	Foreground: lipgloss.Color("#e6edf3"),
-	Subtle:     lipgloss.Color("#7d8590"),
-	Highlight:  lipgloss.Color("#58a6ff"),
-	Special:    lipgloss.Color("#a371f7"),
-
-	// Semantic colors
-	Primary:   lipgloss.Color("#58a6ff"),
-	Secondary: lipgloss.Color("#a371f7"),
-	Success:   lipgloss.Color("#3fb950"),
-	Warning:   lipgloss.Color("#d29922"),
-	Error:     lipgloss.Color("#f85149"),
-	Info:      lipgloss.Color("#58a6ff"),
-
-	// Chat colors
-	UserMessage:      lipgloss.Color("#79c0ff"),
-	AssistantMessage: lipgloss.Color("#e6edf3"),
-	SystemMessage:    lipgloss.Color("#7d8590"),
-	ToolMessage:      lipgloss.Color("#3fb950"),
-
-	// UI element colors
-	Border:        lipgloss.Color("#30363d"),
-	BorderFocused: lipgloss.Color("#58a6ff"),
-	StatusBar:     lipgloss.Color("#161b22"),
-	StatusBarText: lipgloss.Color("#7d8590"),
-	InputBg:       lipgloss.Color("#161b22"),
-	InputText:     lipgloss.Color("#e6edf3"),
-	Placeholder:   lipgloss.Color("#484f58"),
-}
-
-// LightTheme is the light color scheme
-var LightTheme = Theme{
-	Name: "light",
-
-	// Base colors - Clean, modern light theme
-	Background: lipgloss.Color("#ffffff"),
-	Foreground: lipgloss.Color("#1f2328"),
-	Subtle:     lipgloss.Color("#656d76"),
-	Highlight:  lipgloss.Color("#0969da"),
-	Special:    lipgloss.Color("#8250df"),
+	// Base colors
+	Background: lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#0d1117"},
+	Foreground: lipgloss.AdaptiveColor{Light: "#1f2328", Dark: "#e6edf3"},
+	Subtle:     lipgloss.AdaptiveColor{Light: "#656d76", Dark: "#7d8590"},
+	Highlight:  lipgloss.AdaptiveColor{Light: "#0969da", Dark: "#58a6ff"},
+	Special:    lipgloss.AdaptiveColor{Light: "#8250df", Dark: "#a371f7"},
 
 	// Semantic colors
-	Primary:   lipgloss.Color("#0969da"),
-	Secondary: lipgloss.Color("#8250df"),
-	Success:   lipgloss.Color("#1a7f37"),
-	Warning:   lipgloss.Color("#9a6700"),
-	Error:     lipgloss.Color("#cf222e"),
-	Info:      lipgloss.Color("#0969da"),
+	Primary:   lipgloss.AdaptiveColor{Light: "#0969da", Dark: "#58a6ff"},
+	Secondary: lipgloss.AdaptiveColor{Light: "#8250df", Dark: "#a371f7"},
+	Success:   lipgloss.AdaptiveColor{Light: "#1a7f37", Dark: "#3fb950"},
+	Warning:   lipgloss.AdaptiveColor{Light: "#9a6700", Dark: "#d29922"},
+	Error:     lipgloss.AdaptiveColor{Light: "#cf222e", Dark: "#f85149"},
+	Info:      lipgloss.AdaptiveColor{Light: "#0969da", Dark: "#58a6ff"},
 
 	// Chat colors
-	UserMessage:      lipgloss.Color("#0550ae"),
-	AssistantMessage: lipgloss.Color("#1f2328"),
-	SystemMessage:    lipgloss.Color("#656d76"),
-	ToolMessage:      lipgloss.Color("#1a7f37"),
+	UserMessage:      lipgloss.AdaptiveColor{Light: "#0550ae", Dark: "#79c0ff"},
+	AssistantMessage: lipgloss.AdaptiveColor{Light: "#1f2328", Dark: "#e6edf3"},
+	SystemMessage:    lipgloss.AdaptiveColor{Light: "#656d76", Dark: "#7d8590"},
+	ToolMessage:      lipgloss.AdaptiveColor{Light: "#1a7f37", Dark: "#3fb950"},
 
 	// UI element colors
-	Border:        lipgloss.Color("#d0d7de"),
-	BorderFocused: lipgloss.Color("#0969da"),
-	StatusBar:     lipgloss.Color("#f6f8fa"),
-	StatusBarText: lipgloss.Color("#656d76"),
-	InputBg:       lipgloss.Color("#f6f8fa"),
-	InputText:     lipgloss.Color("#1f2328"),
-	Placeholder:   lipgloss.Color("#6e7781"),
+	Border:        lipgloss.AdaptiveColor{Light: "#d0d7de", Dark: "#30363d"},
+	BorderFocused: lipgloss.AdaptiveColor{Light: "#0969da", Dark: "#58a6ff"},
+	StatusBar:     lipgloss.AdaptiveColor{Light: "#f6f8fa", Dark: "#161b22"},
+	StatusBarText: lipgloss.AdaptiveColor{Light: "#656d76", Dark: "#7d8590"},
+	InputBg:       lipgloss.AdaptiveColor{Light: "#f6f8fa", Dark: "#161b22"},
+	InputText:     lipgloss.AdaptiveColor{Light: "#1f2328", Dark: "#e6edf3"},
+	Placeholder:   lipgloss.AdaptiveColor{Light: "#6e7781", Dark: "#484f58"},
+
+	// Diff colors
+	DiffAddedBg:   lipgloss.AdaptiveColor{Light: "#d4edda", Dark: "#1c3a1c"},
+	DiffRemovedBg: lipgloss.AdaptiveColor{Light: "#f8d7da", Dark: "#3d1a1a"},
 }
 
 // Styles holds all the lipgloss styles for the application
@@ -190,6 +163,25 @@ type Styles struct {
 	DiffFileHeader    lipgloss.Style
 	DiffLineNumber    lipgloss.Style
 	DiffPanel         lipgloss.Style
+
+	// Agentic Mode styles
+	TaskPanelHeader     lipgloss.Style
+	TaskPhaseBadge      lipgloss.Style
+	TaskProgressFilled  lipgloss.Style
+	TaskProgressEmpty   lipgloss.Style
+	TaskTodoCard        lipgloss.Style
+	TaskTodoSelected    lipgloss.Style
+	TaskTodoCompleted   lipgloss.Style
+	TaskTodoFailed      lipgloss.Style
+	TaskTodoInProgress  lipgloss.Style
+	TaskStatusBadge     lipgloss.Style
+	TaskSectionHeader   lipgloss.Style
+	TaskTimeEstimate    lipgloss.Style
+	ProposalPanel       lipgloss.Style
+	ProposalTitle       lipgloss.Style
+	ProposalChange      lipgloss.Style
+	ProposalButton      lipgloss.Style
+	ProposalButtonFocus lipgloss.Style
 }
 
 // NewStyles creates a new Styles instance with the given theme
@@ -242,7 +234,7 @@ func NewStyles(theme Theme) Styles {
 		MarginRight(1)
 
 	s.CodeBlock = lipgloss.NewStyle().
-		Background(lipgloss.Color("#21262d")).
+		Background(lipgloss.AdaptiveColor{Light: "#f6f8fa", Dark: "#21262d"}).
 		Foreground(theme.Foreground).
 		Padding(1, 2).
 		MarginTop(1).
@@ -324,7 +316,7 @@ func NewStyles(theme Theme) Styles {
 	s.FilePickerSelected = lipgloss.NewStyle().
 		Foreground(theme.Highlight).
 		Bold(true).
-		Background(lipgloss.Color("#21262d"))
+		Background(lipgloss.AdaptiveColor{Light: "#ddf4ff", Dark: "#21262d"})
 
 	s.FilePickerDir = lipgloss.NewStyle().
 		Foreground(theme.Primary)
@@ -360,7 +352,7 @@ func NewStyles(theme Theme) Styles {
 		Foreground(theme.Primary).
 		Bold(true).
 		PaddingRight(1).
-		Background(lipgloss.Color("#21262d"))
+		Background(lipgloss.AdaptiveColor{Light: "#ddf4ff", Dark: "#21262d"})
 
 	s.ActionButton = lipgloss.NewStyle().
 		Foreground(theme.Foreground).
@@ -402,31 +394,22 @@ func NewStyles(theme Theme) Styles {
 		Foreground(theme.Border)
 
 	// Diff panel styles - VS Code-inspired
-	var diffAddedBg, diffRemovedBg lipgloss.Color
-	if theme.Name == "dark" {
-		diffAddedBg = lipgloss.Color("#1c3a1c")   // Dark green background
-		diffRemovedBg = lipgloss.Color("#3d1a1a") // Dark red background
-	} else {
-		diffAddedBg = lipgloss.Color("#d4edda")   // Light green background
-		diffRemovedBg = lipgloss.Color("#f8d7da") // Light red background
-	}
-
 	s.DiffAddedLine = lipgloss.NewStyle().
 		Foreground(theme.Success).
-		Background(diffAddedBg)
+		Background(theme.DiffAddedBg)
 
 	s.DiffAddedPrefix = lipgloss.NewStyle().
 		Foreground(theme.Success).
-		Background(diffAddedBg).
+		Background(theme.DiffAddedBg).
 		Bold(true)
 
 	s.DiffRemovedLine = lipgloss.NewStyle().
 		Foreground(theme.Error).
-		Background(diffRemovedBg)
+		Background(theme.DiffRemovedBg)
 
 	s.DiffRemovedPrefix = lipgloss.NewStyle().
 		Foreground(theme.Error).
-		Background(diffRemovedBg).
+		Background(theme.DiffRemovedBg).
 		Bold(true)
 
 	s.DiffContextLine = lipgloss.NewStyle().
@@ -450,10 +433,87 @@ func NewStyles(theme Theme) Styles {
 		Padding(1, 2).
 		Background(theme.Background)
 
+	// Agentic Mode styles - Professional, modern design
+	s.TaskPanelHeader = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(theme.Primary).
+		PaddingBottom(1)
+
+	s.TaskPhaseBadge = lipgloss.NewStyle().
+		Bold(true).
+		Padding(0, 2).
+		MarginLeft(1)
+
+	s.TaskProgressFilled = lipgloss.NewStyle().
+		Foreground(theme.Success)
+
+	s.TaskProgressEmpty = lipgloss.NewStyle().
+		Foreground(theme.Subtle)
+
+	s.TaskTodoCard = lipgloss.NewStyle().
+		Foreground(theme.Foreground).
+		PaddingLeft(2)
+
+	s.TaskTodoSelected = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(theme.Primary).
+		Background(lipgloss.AdaptiveColor{Light: "#ddf4ff", Dark: "#21262d"}).
+		PaddingLeft(2)
+
+	s.TaskTodoCompleted = lipgloss.NewStyle().
+		Foreground(theme.Success).
+		Strikethrough(true).
+		PaddingLeft(2)
+
+	s.TaskTodoFailed = lipgloss.NewStyle().
+		Foreground(theme.Error).
+		PaddingLeft(2)
+
+	s.TaskTodoInProgress = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(theme.Warning).
+		PaddingLeft(2)
+
+	s.TaskStatusBadge = lipgloss.NewStyle().
+		Bold(true).
+		Padding(0, 1)
+
+	s.TaskSectionHeader = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(theme.Foreground).
+		MarginTop(1)
+
+	s.TaskTimeEstimate = lipgloss.NewStyle().
+		Foreground(theme.Subtle).
+		Italic(true)
+
+	s.ProposalPanel = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(theme.Primary).
+		Padding(1, 2).
+		Background(theme.Background)
+
+	s.ProposalTitle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(theme.Primary)
+
+	s.ProposalChange = lipgloss.NewStyle().
+		Foreground(theme.Foreground).
+		PaddingLeft(3)
+
+	s.ProposalButton = lipgloss.NewStyle().
+		Padding(0, 3).
+		MarginRight(2)
+
+	s.ProposalButtonFocus = lipgloss.NewStyle().
+		Bold(true).
+		Padding(0, 3).
+		MarginRight(2)
+
 	return s
 }
 
-// DefaultStyles returns styles with the dark theme
+// DefaultStyles returns styles with the adaptive theme
 func DefaultStyles() Styles {
-	return NewStyles(DarkTheme)
+	return NewStyles(AdaptiveTheme)
 }
