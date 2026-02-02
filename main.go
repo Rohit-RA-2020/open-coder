@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -220,6 +221,10 @@ func (m appModel) View() string {
 }
 
 func main() {
+	// Parse command line flags
+	minimalMode := flag.String("m", "", "Run in minimal mode with the given prompt")
+	flag.Parse()
+
 	ctx := context.Background()
 
 	// Get configuration
@@ -228,11 +233,53 @@ func main() {
 		log.Fatalf("Failed to get configuration: %v", err)
 	}
 
+	// Setup logging to file (even in minimal mode, to avoid polluting stdout)
+	f, err := tea.LogToFile("open-coder.log", "debug")
+	if err != nil {
+		log.Fatalf("fatal: could not open log file: %v", err)
+	}
+	defer f.Close()
+
 	// Create agent
 	agent := ui.NewAgent(ctx, config.Model, config.APIKey, config.BaseURL)
 	defer agent.Close()
 
-	// Initialize conversation with enhanced system prompt
+	// Check if running in minimal mode
+	if *minimalMode != "" {
+		// Initialize concise conversation
+		agent.InitConversation(`You are an expert AI coding assistant.
+1. Be extremely concise. Output only the code or the direct answer.
+2. Do not use markdown formatting unless strictly necessary for code blocks.
+3. Do not be chatty. No "Here is the code" or "I have done X".
+4. Use tools proactively and silently.`)
+
+		// Connect tools (headless)
+		// We need to replicate the discovery logic from appModel.initializeAgent
+		count, err := agent.DiscoverAndConnectServers()
+		if err != nil {
+			log.Printf("Warning: error discovering servers: %v", err)
+		}
+
+		if count > 0 {
+			if err := agent.RefreshTools(); err != nil {
+				log.Printf("Warning: error refreshing tools: %v", err)
+			}
+		}
+
+		// Set output to stdout
+		agent.OutputWriter = os.Stdout
+
+		// Run headless
+		if err := agent.RunHeadless(*minimalMode); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		// Add a newline after the output
+		fmt.Println()
+		return
+	}
+
+	// Normal TUI mode
 	agent.InitConversation(`You are an expert AI coding assistant. Your role is to help developers write, understand, debug, and improve code.
 
 ## Core Capabilities
@@ -276,14 +323,6 @@ Answer directly and concisely. Use tools to verify facts about the codebase.
 		Model: uiModel,
 		agent: agent,
 	}
-
-	// Create the Bubble Tea program
-	// Setup logging to file
-	f, err := tea.LogToFile("open-coder.log", "debug")
-	if err != nil {
-		log.Fatalf("fatal: could not open log file: %v", err)
-	}
-	defer f.Close()
 
 	p := tea.NewProgram(
 		model,

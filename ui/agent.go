@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"io"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -62,6 +63,9 @@ type Agent struct {
 
 	// Undo/Redo history
 	historyMgr *history.HistoryManager
+
+	// Output writer for headless mode
+	OutputWriter io.Writer
 }
 
 // MCPServer represents a connected MCP server
@@ -345,6 +349,30 @@ func (a *Agent) ProcessMessage(content string) tea.Cmd {
 	}
 }
 
+// RunHeadless runs the agent without UI for a single turn
+func (a *Agent) RunHeadless(content string) error {
+	// Count input tokens
+	tokens := a.countTokens(content)
+	a.mu.Lock()
+	a.inputTokens += tokens
+	a.mu.Unlock()
+
+	// Track user message
+	a.trackConversationMessage("user", content, "", "")
+
+	a.messages = append(a.messages, openai.UserMessage(content))
+
+	// Run conversation processing
+	msg := a.processConversation()
+
+	// Check for errors
+	if errMsg, ok := msg.(StreamErrorMsg); ok {
+		return errMsg.Err
+	}
+
+	return nil
+}
+
 // shouldUseAgenticMode determines if a request should trigger agentic planning mode
 // It detects task-like requests vs simple questions/conversations
 func (a *Agent) shouldUseAgenticMode(content string) bool {
@@ -437,6 +465,11 @@ func (a *Agent) processConversation() tea.Msg {
 			if len(current.Choices) > 0 && current.Choices[0].Delta.Content != "" {
 				chunkContent := current.Choices[0].Delta.Content
 				currentOutputTokens += a.countTokens(chunkContent)
+
+				// Write to output writer if set (for headless mode)
+				if a.OutputWriter != nil {
+					fmt.Fprint(a.OutputWriter, chunkContent)
+				}
 
 				if a.program != nil {
 					a.program.Send(StreamChunkMsg{
