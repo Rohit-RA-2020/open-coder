@@ -1486,7 +1486,8 @@ func (m Model) handleCommand(content string) (ViewState, tea.Cmd) {
 	// Handle inline approval for agentic mode
 	if m.isAgenticMode && m.taskPanel != nil && m.taskPanel.Task != nil {
 		if m.taskPanel.Task.Status == agentic.TaskAwaitingApproval {
-			if lower == "y" || lower == "yes" {
+			switch lower {
+			case "y", "yes":
 				// Approve and execute
 				m.messages = append(m.messages, ChatMessage{
 					Role:    RoleUser,
@@ -1495,7 +1496,7 @@ func (m Model) handleCommand(content string) (ViewState, tea.Cmd) {
 				return ViewChat, func() tea.Msg {
 					return AgenticProposalApprovedMsg{TaskID: m.taskPanel.Task.ID}
 				}
-			} else if lower == "n" || lower == "no" {
+			case "n", "no":
 				// Reject
 				m.messages = append(m.messages, ChatMessage{
 					Role:    RoleUser,

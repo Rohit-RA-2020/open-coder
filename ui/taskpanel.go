@@ -452,9 +452,10 @@ func (tp *TaskPanel) renderFooter() string {
 
 	var hints []string
 
-	if tp.Task.Status == agentic.TaskPaused {
+	switch tp.Task.Status {
+	case agentic.TaskPaused:
 		hints = append(hints, keyStyle.Render("[r]")+descStyle.Render("esume"))
-	} else if tp.Task.Status == agentic.TaskExecuting {
+	case agentic.TaskExecuting:
 		hints = append(hints, keyStyle.Render("[p]")+descStyle.Render("ause"))
 	}
 
