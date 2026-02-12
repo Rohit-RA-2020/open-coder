@@ -5,6 +5,8 @@
 
 A powerful AI coding agent that interacts with your codebase through natural language conversations with full access to create, read, delete, and update files using the Model Context Protocol (MCP).
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Rohit-RA-2020/open-coder)
+
 ## Features
 
 - **Modern TUI Interface** - Aesthetic split-pane terminal UI built with Bubble Tea
