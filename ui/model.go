@@ -1743,8 +1743,21 @@ func (m Model) handleStreamChunk(msg StreamChunkMsg) (tea.Model, tea.Cmd) {
 func (m *Model) updateViewport() {
 	var content strings.Builder
 
-	for _, msg := range m.messages {
-		content.WriteString(m.renderMessage(msg))
+	for i := range m.messages {
+		// Use pointer to update cache in place
+		msg := &m.messages[i]
+
+		// If we have cached content and not streaming, use it
+		if msg.RenderedContent != "" && !msg.Streaming {
+			content.WriteString(msg.RenderedContent)
+		} else {
+			// Render and cache
+			rendered := m.renderMessage(*msg)
+			if !msg.Streaming {
+				msg.RenderedContent = rendered
+			}
+			content.WriteString(rendered)
+		}
 		content.WriteString("\n")
 	}
 
@@ -1758,6 +1771,11 @@ func (m *Model) updateViewport() {
 
 // renderMessage renders a single chat message
 func (m *Model) renderMessage(msg ChatMessage) string {
+	// Use cached content if available and not streaming
+	if msg.RenderedContent != "" && !msg.Streaming {
+		return msg.RenderedContent
+	}
+
 	var label, content string
 
 	// Calculate max width for content (leave room for label)
@@ -1805,7 +1823,13 @@ func (m *Model) renderMessage(msg ChatMessage) string {
 		content = m.styles.MessageTool.Width(maxWidth).Render(msg.Content)
 	}
 
-	return fmt.Sprintf("%s %s", label, content)
+	rendered := fmt.Sprintf("%s %s", label, content)
+
+	// Cache the result if not streaming
+	// We can't modify msg here since it's passed by value, but the caller (updateViewport)
+	// will use the returned string. To actually cache, we need to update the slice in Model.
+	// However, since this function is pure rendering, we'll update the cache in updateViewport loop instead.
+	return rendered
 }
 
 // renderToolPanel renders the current tool execution panel

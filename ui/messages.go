@@ -332,11 +332,13 @@ const (
 
 // ChatMessage represents a message in the chat history
 type ChatMessage struct {
-	Role      ChatMessageRole
-	Content   string
-	ToolName  string // For tool messages
-	ToolID    string // For tool messages
-	Streaming bool   // Currently being streamed
+	Role            ChatMessageRole
+	Content         string
+	Streaming       bool   // Currently being streamed
+	ToolName        string // For tool messages
+	ToolID          string // For tool messages
+	Args            map[string]interface{}
+	RenderedContent string // Cache for rendered markdown
 }
 
 // ConversationSavedMsg indicates a conversation was saved

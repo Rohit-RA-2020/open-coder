@@ -42,6 +42,8 @@ type TreeNode struct {
 	IsDir      bool
 	IsExpanded bool
 	IsRoot     bool
+	Wrapped    bool // For long lines (not used yet, but good for future)
+	Loaded     bool // Lazy loading status
 	Children   []*TreeNode
 	Depth      int
 }
@@ -62,8 +64,17 @@ type FileTree struct {
 }
 
 // NewFileTree creates a new file tree
+// NewFileTree creates a new file tree
 func NewFileTree(rootPath string, styles Styles) *FileTree {
-	root := buildTree(rootPath, "", 0)
+	root := &TreeNode{
+		Path:   rootPath,
+		Name:   filepath.Base(rootPath),
+		IsDir:  true,
+		Depth:  0,
+		IsRoot: true,
+		Loaded: true, // Root is always loaded initially
+	}
+	loadChildren(root)
 	flatNodes := flattenTree(root)
 
 	return &FileTree{
@@ -84,36 +95,43 @@ func (ft *FileTree) SetProgram(p *tea.Program) {
 	ft.program = *p
 }
 
-// buildTree recursively builds the file tree
-func buildTree(path string, name string, depth int) *TreeNode {
-	info, err := os.Stat(path)
+// loadChildren populates the children of a directory node
+func loadChildren(node *TreeNode) {
+	if !node.IsDir {
+		return
+	}
+
+	entries, err := os.ReadDir(node.Path)
 	if err != nil {
-		return nil
+		return
 	}
 
-	node := &TreeNode{
-		Path:   path,
-		Name:   name,
-		IsDir:  info.IsDir(),
-		Depth:  depth,
-		IsRoot: depth == 0,
-	}
-
-	if node.IsDir {
-		entries, err := os.ReadDir(path)
-		if err == nil {
-			for _, entry := range entries {
-				childPath := filepath.Join(path, entry.Name())
-				child := buildTree(childPath, entry.Name(), depth+1)
-				if child != nil {
-					node.Children = append(node.Children, child)
-				}
+	node.Children = []*TreeNode{} // Clear existing children if any
+	for _, entry := range entries {
+		// Skip hidden files if likely to be ignored (basic filtering)
+		if strings.HasPrefix(entry.Name(), ".") && entry.Name() != ".gitignore" && entry.Name() != ".env" {
+			// We'll let the view filter decide visibility, but we can skip .git folder for performance
+			if entry.Name() == ".git" {
+				continue
 			}
 		}
-	}
 
-	return node
+		child := &TreeNode{
+			Path:   filepath.Join(node.Path, entry.Name()),
+			Name:   entry.Name(),
+			IsDir:  entry.IsDir(),
+			Depth:  node.Depth + 1,
+			IsRoot: false,
+			Loaded: false, // Children are not loaded by default
+		}
+		node.Children = append(node.Children, child)
+	}
+	node.Loaded = true
 }
+
+// Replaced buildTree with lazy loading approach
+// buildTree is no longer used directly but kept for compatibility explanation:
+// We now explicitly create the root and call loadChildren.
 
 // flattenTree creates a flattened list of visible nodes
 func flattenTree(root *TreeNode) []*TreeNode {
@@ -187,9 +205,14 @@ func (ft *FileTree) handleKey(msg tea.KeyMsg) (*FileTree, tea.Cmd) {
 	case key.Matches(msg, ft.KeyMap.Right), key.Matches(msg, ft.KeyMap.Expand):
 		if ft.Cursor >= 0 && ft.Cursor < len(ft.FlatNodes) {
 			node := ft.FlatNodes[ft.Cursor]
-			if node.IsDir && !node.IsExpanded {
-				node.IsExpanded = true
-				ft.FlatNodes = flattenTree(ft.Root)
+			if node.IsDir {
+				if !node.Loaded { // Check if children need loading
+					loadChildren(node)
+				}
+				if !node.IsExpanded {
+					node.IsExpanded = true
+					ft.FlatNodes = flattenTree(ft.Root)
+				}
 			}
 		}
 
@@ -363,9 +386,17 @@ func (ft *FileTree) getFileIcon(node *TreeNode) string {
 	}
 }
 
-// Refresh rebuilds the tree
+// Refresh rebuilds the tree from current root
 func (ft *FileTree) Refresh(rootPath string) {
-	ft.Root = buildTree(rootPath, "", 0)
+	ft.Root = &TreeNode{
+		Path:   rootPath,
+		Name:   filepath.Base(rootPath),
+		IsDir:  true,
+		Depth:  0,
+		IsRoot: true,
+		Loaded: true,
+	}
+	loadChildren(ft.Root)
 	ft.FlatNodes = flattenTree(ft.Root)
 	ft.Cursor = 0
 	ft.offset = 0
