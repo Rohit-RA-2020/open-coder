@@ -1,11 +1,12 @@
 # Open Coder
 
+
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Rohit-RA-2020/open-coder)
+
 ![Example Screenshot](images/1.png)
 ![Example Screenshot](images/2.png)
 
 A powerful AI coding agent that interacts with your codebase through natural language conversations with full access to create, read, delete, and update files using the Model Context Protocol (MCP).
-
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Rohit-RA-2020/open-coder)
 
 ## Features
 
