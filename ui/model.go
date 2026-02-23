@@ -319,29 +319,62 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ToolCallStartMsg:
 		m.currentTool = &msg
+
+		// Format tool arguments for display
+		var argsContent string
+		if len(msg.Args) > 0 {
+			var args []string
+			for k, v := range msg.Args {
+				valStr := fmt.Sprintf("%v", v)
+				// Truncate very long arguments
+				valStr = strings.ReplaceAll(valStr, "\n", " ")
+				if len(valStr) > 40 {
+					valStr = valStr[:37] + "..."
+				}
+				args = append(args, fmt.Sprintf("%s=%s", k, valStr))
+			}
+			argsContent = fmt.Sprintf(" (%s)", strings.Join(args, ", "))
+		}
+
 		m.messages = append(m.messages, ChatMessage{
 			Role:     RoleTool,
-			Content:  fmt.Sprintf("🔧 Calling: %s", msg.ToolName),
+			Content:  fmt.Sprintf("🔧 %s%s", msg.ToolName, argsContent),
 			ToolName: msg.ToolName,
 			ToolID:   msg.ToolID,
+			Args:     msg.Args,
 		})
 		m.updateViewport()
 		return m, m.spinner.Tick
 
 	case ToolCallResultMsg:
 		m.currentTool = nil
-		content := msg.Result
+
 		if msg.Error != nil {
-			content = fmt.Sprintf("❌ Error: %v", msg.Error)
+			m.messages = append(m.messages, ChatMessage{
+				Role:     RoleTool,
+				Content:  fmt.Sprintf("❌ Error: %v", msg.Error),
+				ToolName: msg.ToolName,
+				ToolID:   msg.ToolID,
+			})
 		} else {
-			content = fmt.Sprintf("✅ %s completed", msg.ToolName)
+			// Clean up newlines for a more compact display
+			displayResult := strings.ReplaceAll(msg.Result, "\n", " ")
+			// Repeated spaces can look weird on one line
+			for strings.Contains(displayResult, "  ") {
+				displayResult = strings.ReplaceAll(displayResult, "  ", " ")
+			}
+
+			if len(displayResult) > 80 {
+				displayResult = displayResult[:77] + "..."
+			}
+
+			m.messages = append(m.messages, ChatMessage{
+				Role:     RoleTool,
+				Content:  fmt.Sprintf("✅ %s → %s", msg.ToolName, displayResult),
+				ToolName: msg.ToolName,
+				ToolID:   msg.ToolID,
+			})
 		}
-		m.messages = append(m.messages, ChatMessage{
-			Role:     RoleTool,
-			Content:  content,
-			ToolName: msg.ToolName,
-			ToolID:   msg.ToolID,
-		})
 		m.updateViewport()
 		return m, nil
 
