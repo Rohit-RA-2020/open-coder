@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -11,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"io"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -219,6 +219,33 @@ func (a *Agent) RefreshTools() error {
 		}
 		allTools = append(allTools, tools...)
 	}
+
+	// Add internal tool: todo_write
+	todoWriteSchema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"todos": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"id":     map[string]any{"type": "string"},
+						"title":  map[string]any{"type": "string"},
+						"status": map[string]any{"type": "string", "enum": []string{"pending", "in_progress", "completed", "failed", "skipped"}},
+					},
+					"required": []string{"title", "status"},
+				},
+			},
+			"merge": map[string]any{"type": "boolean"},
+		},
+		"required": []string{"todos"},
+	}
+
+	allTools = append(allTools, openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+		Name:        "todo_write",
+		Description: openai.String("Write or update the underlying checklist of tasks for this AI agent. IMPORTANT: use this to manage a checklist when completing a larger goal for the user."),
+		Parameters:  openai.FunctionParameters(todoWriteSchema),
+	}))
 
 	a.tools = allTools
 	return nil
@@ -600,7 +627,13 @@ func (a *Agent) executeTool(toolCall ToolCall) (interface{}, error) {
 	}()
 
 	// Execute the tool
-	result, err := a.callTool(toolCtx, toolCall.Name, args)
+	var result interface{}
+	var err error
+	if toolCall.Name == "todo_write" {
+		result, err = a.handleTodoWrite(args)
+	} else {
+		result, err = a.callTool(toolCtx, toolCall.Name, args)
+	}
 
 	// Send result message
 	if a.program != nil {
@@ -1378,4 +1411,85 @@ func (a *Agent) IsAgenticModeActive() bool {
 // IsAgenticModePaused returns whether agentic mode is paused
 func (a *Agent) IsAgenticModePaused() bool {
 	return agenticExecutor != nil && agenticExecutor.IsPaused()
+}
+
+// handleTodoWrite handles the internal "todo_write" tool to update the agent's task.
+func (a *Agent) handleTodoWrite(args map[string]any) (interface{}, error) {
+	// check if there's an active internal agentic.Task. If not, create one.
+	if agenticTask == nil {
+		agenticTask = agentic.NewTask("Auto-generated task from tool")
+		agenticTask.Status = agentic.TaskExecuting
+	}
+
+	todosRaw, ok := args["todos"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid or missing 'todos' array")
+	}
+
+	merge := false
+	if m, ok := args["merge"].(bool); ok && m {
+		merge = true
+	}
+
+	// Update existing task if merge, otherwise replace
+	if !merge {
+		agenticTask.Todos = []agentic.Todo{}
+	}
+
+	for i, tRaw := range todosRaw {
+		todoMap, ok := tRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		title, _ := todoMap["title"].(string)
+		statusStr, _ := todoMap["status"].(string)
+		id, _ := todoMap["id"].(string)
+
+		if title == "" {
+			continue
+		}
+
+		status := agentic.TodoStatus(statusStr)
+		if status == "" {
+			status = agentic.TodoPending
+		}
+
+		// Try to find if the todo already exists
+		var existingTodo *agentic.Todo
+		if merge {
+			if id != "" {
+				existingTodo = agenticTask.GetTodoByID(id)
+			}
+			if existingTodo == nil {
+				// Search by title
+				for idx := range agenticTask.Todos {
+					if agenticTask.Todos[idx].Title == title {
+						existingTodo = &agenticTask.Todos[idx]
+						break
+					}
+				}
+			}
+		}
+
+		if existingTodo != nil {
+			// update existing
+			existingTodo.Status = status
+		} else {
+			// Append new
+			newTodo := agentic.NewTodo(title, agentic.PhaseExecution, len(agenticTask.Todos)+i)
+			if id != "" {
+				newTodo.ID = id
+			}
+			newTodo.Status = status
+			agenticTask.AddTodo(newTodo)
+		}
+	}
+
+	// Dispatch an update to the UI
+	if a.program != nil {
+		a.program.Send(AgenticTaskUpdatedMsg{Task: agenticTask})
+	}
+
+	return fmt.Sprintf("Updated %d todos successfully.", len(agenticTask.Todos)), nil
 }

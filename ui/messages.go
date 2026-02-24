@@ -447,6 +447,11 @@ type AgenticTaskUpdateMsg struct {
 	Message string
 }
 
+// AgenticTaskUpdatedMsg provides a full task sync update
+type AgenticTaskUpdatedMsg struct {
+	Task interface{} // *agentic.Task
+}
+
 // AgenticPhaseChangedMsg indicates phase transition
 type AgenticPhaseChangedMsg struct {
 	TaskID   string

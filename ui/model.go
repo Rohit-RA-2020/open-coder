@@ -814,6 +814,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case AgenticTaskUpdatedMsg:
+		// Full task replacement from todo_write
+		if m.taskPanel != nil {
+			if task, ok := msg.Task.(*agentic.Task); ok {
+				m.taskPanel.Task = task
+			}
+		}
+		// Bring up the task view if it isn't already active
+		m.view = ViewAgenticTask
+		m.updateViewport()
+		return m, nil
+
 	case AgenticPhaseChangedMsg:
 		m.messages = append(m.messages, ChatMessage{
 			Role:    RoleSystem,
@@ -1809,34 +1821,34 @@ func (m *Model) renderMessage(msg ChatMessage) string {
 		return msg.RenderedContent
 	}
 
-	var label, content string
+	var rendered string
 
-	// Calculate max width for content (leave room for label)
-	maxWidth := m.width - 20
+	// Calculate max width for content (leave room for padding)
+	maxWidth := m.width - 12
 	if maxWidth < 40 {
 		maxWidth = 40
 	}
 
 	switch msg.Role {
 	case RoleUser:
-		label = m.styles.MessageLabel.Foreground(m.styles.Theme.UserMessage).Render("You ▸")
-		// User messages get a subtle left border to stand out (theme-aware)
+		label := m.styles.MessageLabel.Foreground(m.styles.Theme.UserMessage).Render("You")
+		// User messages get a distinct border box to stand out
 		userStyle := lipgloss.NewStyle().
 			Foreground(m.styles.Theme.UserMessage).
-			BorderLeft(true).
-			BorderStyle(lipgloss.ThickBorder()).
-			BorderForeground(m.styles.Theme.Primary).
-			PaddingLeft(1).
-			Width(maxWidth)
-		content = userStyle.Render(msg.Content)
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(m.styles.Theme.BorderFocused).
+			Padding(0, 1).
+			Width(maxWidth - 2)
+		rendered = lipgloss.JoinVertical(lipgloss.Left, label, userStyle.Render(msg.Content))
 
 	case RoleAssistant:
-		label = m.styles.MessageLabel.Foreground(m.styles.Theme.AssistantMessage).Render("Assistant ▸")
+		label := m.styles.MessageLabel.Foreground(m.styles.Theme.AssistantMessage).Render("Assistant ✧")
+		var content string
 		// Try to render as markdown (with nil check for renderer)
 		if m.renderer != nil {
-			rendered, err := m.renderer.Render(msg.Content)
+			renderedMD, err := m.renderer.Render(msg.Content)
 			if err == nil {
-				content = strings.TrimSpace(rendered)
+				content = strings.TrimSpace(renderedMD)
 			} else {
 				content = m.styles.MessageAssist.Width(maxWidth).Render(msg.Content)
 			}
@@ -1844,24 +1856,24 @@ func (m *Model) renderMessage(msg ChatMessage) string {
 			content = m.styles.MessageAssist.Width(maxWidth).Render(msg.Content)
 		}
 		if msg.Streaming {
-			content += m.spinner.View()
+			content += " " + m.spinner.View()
 		}
+		rendered = lipgloss.JoinVertical(lipgloss.Left, label, content)
 
 	case RoleSystem:
-		label = m.styles.MessageLabel.Foreground(m.styles.Theme.SystemMessage).Render("System ▸")
-		content = m.styles.MessageSystem.Width(maxWidth).Render(msg.Content)
+		label := m.styles.MessageLabel.Foreground(m.styles.Theme.SystemMessage).Render("System ▸")
+		content := m.styles.MessageSystem.Width(maxWidth).Render(msg.Content)
+		rendered = lipgloss.JoinVertical(lipgloss.Left, label, content)
 
 	case RoleTool:
-		label = m.styles.MessageLabel.Foreground(m.styles.Theme.ToolMessage).Render("Tool ▸")
-		content = m.styles.MessageTool.Width(maxWidth).Render(msg.Content)
+		label := m.styles.MessageLabel.Foreground(m.styles.Theme.ToolMessage).Render("Tool ▸")
+		content := lipgloss.NewStyle().PaddingLeft(2).Width(maxWidth).Render(msg.Content)
+		rendered = lipgloss.JoinVertical(lipgloss.Left, label, content)
 	}
 
-	rendered := fmt.Sprintf("%s %s", label, content)
+	// Add margin below message directly
+	rendered += "\n"
 
-	// Cache the result if not streaming
-	// We can't modify msg here since it's passed by value, but the caller (updateViewport)
-	// will use the returned string. To actually cache, we need to update the slice in Model.
-	// However, since this function is pure rendering, we'll update the cache in updateViewport loop instead.
 	return rendered
 }
 
@@ -1931,11 +1943,39 @@ func (m Model) View() string {
 func (m Model) renderChat() string {
 	// Header
 	header := m.renderHeader()
+	hHeight := lipgloss.Height(header)
 
-	// Calculate available content height (accounting for header, input, status, borders)
-	contentHeight := m.height - headerHeight() - inputHeight() - 1 - 4
-	if contentHeight < 10 {
-		contentHeight = 10
+	// Command autocomplete dropdown
+	var commandMenu string
+	var cMenuHeight int
+	if m.showCommandMenu {
+		commandMenu = m.renderCommandMenu()
+		cMenuHeight = lipgloss.Height(commandMenu)
+	}
+
+	// Input area - highlight when chat is focused
+	inputStyle := m.styles.InputContainer
+	if m.panelFocus == PanelChat {
+		inputStyle = inputStyle.BorderForeground(m.styles.Theme.BorderFocused)
+	}
+	inputBox := inputStyle.
+		Width(m.width - 4).
+		Render(m.textarea.View())
+	iBoxHeight := lipgloss.Height(inputBox)
+
+	// Status bar
+	statusBar := m.renderStatusBar()
+	sBarHeight := lipgloss.Height(statusBar)
+
+	// Calculate available content height dynamically to prevent terminal scrolling
+	usedHeight := hHeight + cMenuHeight + iBoxHeight + sBarHeight
+	middleHeight := m.height - usedHeight
+	if middleHeight < 5 {
+		middleHeight = 5
+	}
+	contentHeight := middleHeight - 2 // Account for panel borders (top/bottom)
+	if contentHeight < 2 {
+		contentHeight = 2
 	}
 
 	// Calculate layout dimensions with better proportions
@@ -2031,24 +2071,6 @@ func (m Model) renderChat() string {
 	} else {
 		middleSection = chatView
 	}
-
-	// Command autocomplete dropdown
-	var commandMenu string
-	if m.showCommandMenu {
-		commandMenu = m.renderCommandMenu()
-	}
-
-	// Input area - highlight when chat is focused
-	inputStyle := m.styles.InputContainer
-	if m.panelFocus == PanelChat {
-		inputStyle = inputStyle.BorderForeground(m.styles.Theme.BorderFocused)
-	}
-	inputBox := inputStyle.
-		Width(m.width - 4).
-		Render(m.textarea.View())
-
-	// Status bar
-	statusBar := m.renderStatusBar()
 
 	// Combine all elements
 	if commandMenu != "" {
@@ -2158,24 +2180,33 @@ func (m Model) renderStatusBar() string {
 	// Server status
 	if m.serverCount > 0 {
 		items = append(items, m.styles.StatusItem.Render(
-			fmt.Sprintf("%d servers", m.serverCount),
+			m.styles.StatusKey.Render("Servers: ")+m.styles.StatusValue.Render(fmt.Sprintf("%d", m.serverCount)),
 		))
 	}
 
 	// Tool count
 	if m.toolCount > 0 {
 		items = append(items, m.styles.StatusItem.Render(
-			fmt.Sprintf("%d tools", m.toolCount),
+			m.styles.StatusKey.Render("Tools: ")+m.styles.StatusValue.Render(fmt.Sprintf("%d", m.toolCount)),
 		))
 	}
 
 	// Token stats (show if any tokens have been used)
 	if m.inputTokens > 0 || m.outputTokens > 0 {
-		tokenInfo := fmt.Sprintf("In:%d Out:%d Ctx:%d", m.inputTokens, m.outputTokens, m.totalContextTokens)
+		tokVal := fmt.Sprintf("↑%d ↓%d", m.inputTokens, m.outputTokens)
+		items = append(items, m.styles.StatusItem.Render(
+			m.styles.StatusKey.Render("Tokens: ")+m.styles.StatusValue.Render(tokVal),
+		))
+
+		items = append(items, m.styles.StatusItem.Render(
+			m.styles.StatusKey.Render("Ctx: ")+m.styles.StatusValue.Render(fmt.Sprintf("%d", m.totalContextTokens)),
+		))
+
 		if m.avgTokensPerSecond > 0 {
-			tokenInfo += fmt.Sprintf(" %.1f tok/s", m.avgTokensPerSecond)
+			items = append(items, m.styles.StatusItem.Render(
+				m.styles.StatusKey.Render("Speed: ")+m.styles.StatusValue.Render(fmt.Sprintf("%.1f/s", m.avgTokensPerSecond)),
+			))
 		}
-		items = append(items, m.styles.StatusItem.Render(tokenInfo))
 	}
 
 	// Processing indicator
